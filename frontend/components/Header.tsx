@@ -1,65 +1,76 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { Search, Sparkles } from "lucide-react";
 import { User } from "@/lib/api";
-import { clearTokens, getCurrentUserFromStorage } from "@/lib/browser-api";
-
-const roleNav: Record<User["role"], { href: string; label: string }[]> = {
-  benevole: [
-    { href: "/events", label: "Evenements" },
-    { href: "/volunteer", label: "Benevole" },
-    { href: "/volunteer/applications", label: "Mes candidatures" }
-  ],
-  organisation: [
-    { href: "/events", label: "Evenements" },
-    { href: "/organisation", label: "Organisation" },
-    { href: "/organisation/events", label: "Mes evenements" },
-    { href: "/organisation/volunteers", label: "Candidatures" },
-    { href: "/organisation/events/new", label: "Creer evenement" },
-  ],
-  admin: [
-    { href: "/admin", label: "Admin" },
-    { href: "/admin/organisations", label: "Organisations" },
-    { href: "/admin/events", label: "Events" },
-    { href: "/admin/reports", label: "Reports" }
-  ]
-};
+import { getCurrentUserFromStorage } from "@/lib/browser-api";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { AvatarMenu } from "@/components/AvatarMenu";
+import { NotificationBell } from "@/components/NotificationBell";
 
 export function Header() {
+  const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     setUser(getCurrentUserFromStorage());
   }, []);
 
-  function logout() {
-    clearTokens();
-    setUser(null);
-    window.location.href = "/";
+  const logoHref = user?.role === "benevole" ? "/volunteer" : user?.role === "organisation" ? "/organisation" : user?.role === "admin" ? "/admin" : "/";
+
+  function onSearch(event: FormEvent) {
+    event.preventDefault();
+    const value = query.trim();
+    const encoded = value ? `?q=${encodeURIComponent(value)}` : "";
+    if (user?.role === "benevole") {
+      router.push(`/volunteer/discover${encoded}`);
+      return;
+    }
+    if (user?.role === "organisation") {
+      router.push("/organisation/events");
+      return;
+    }
+    if (user?.role === "admin") {
+      router.push("/admin/events");
+      return;
+    }
+    router.push(`/events${encoded}`);
   }
 
-  const navItems = user ? roleNav[user.role] : [{ href: "/events", label: "Evenements" }];
-
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
-      <nav className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-        <Link href="/" className="text-xl font-black text-brand-900">
-          VolunteerHub
+    <header className="sticky top-0 z-40 border-b border-white/40 bg-white/55 backdrop-blur-xl dark:border-white/10 dark:bg-[#1a1033]/70">
+      <nav className="mx-auto flex max-w-7xl items-center gap-4 px-6 py-3">
+        <Link href={logoHref} className="group inline-flex shrink-0 items-center gap-2 text-xl font-black text-brand-900">
+          <span className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-cyan-glow text-white shadow-lg shadow-brand-500/30 transition-transform duration-300 group-hover:scale-110">
+            <Sparkles className="h-4 w-4" />
+          </span>
+          <span className="hidden sm:inline">VolunteerHub</span>
         </Link>
-        <div className="hidden gap-6 text-sm font-semibold text-slate-600 md:flex">
-          {navItems.map((item) => (
-            <Link key={`${item.href}-${item.label}`} href={item.href} className="hover:text-brand-900">
-              {item.label}
-            </Link>
-          ))}
-        </div>
         {user ? (
-          <button className="btn-secondary px-4 py-2 text-sm" onClick={logout} type="button">
-            Deconnexion
-          </button>
+          <>
+            <form onSubmit={onSearch} className="mx-auto min-w-0 flex-1">
+              <label className="relative mx-auto block max-w-xl">
+                <span className="sr-only">Rechercher</span>
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-brand-400" />
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Rechercher une mission..."
+                  className="w-full rounded-full border border-white/50 bg-white/70 py-2.5 pl-11 pr-4 text-sm font-semibold shadow-inner outline-none backdrop-blur-md placeholder:text-slate-400"
+                />
+              </label>
+            </form>
+            <div className="ml-auto flex items-center gap-2">
+              <NotificationBell />
+              <AvatarMenu />
+            </div>
+          </>
         ) : (
-          <div className="flex gap-2">
+          <div className="ml-auto flex items-center gap-2">
+            <ThemeToggle />
             <Link href="/login" className="btn-secondary px-4 py-2 text-sm">
               Connexion
             </Link>

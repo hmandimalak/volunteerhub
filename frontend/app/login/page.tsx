@@ -26,7 +26,7 @@ export default function LoginPage() {
       } else if (user.role === "organisation") {
         window.location.href = "/organisation";
       } else {
-        window.location.href = "/events";
+        window.location.href = "/volunteer";
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Connexion impossible.");
@@ -37,42 +37,30 @@ export default function LoginPage() {
 
   return (
     <section className="mx-auto max-w-xl px-6 py-16">
-      <div className="card">
-        <p className="font-bold text-brand-600">Connexion</p>
-        <h1 className="mt-2 text-3xl font-black">Acceder a VolunteerHub</h1>
+      <div className="card glow-ring">
+        <p className="kicker">Connexion</p>
+        <h1 className="mt-4 text-3xl font-black">Accéder à VolunteerHub</h1>
         <p className="mt-3 text-sm text-slate-600">
-          Connectez-vous avec un compte cree dans Django Admin ou via l'endpoint d'inscription.
+          Connectez-vous avec un compte créé dans l'administration Django ou via le formulaire d'inscription.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-8 grid gap-4">
           <label className="grid gap-2 text-sm font-semibold">
-            Email
-            <input
-              className="rounded-2xl border border-slate-300 px-4 py-3 font-normal"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              required
-            />
+            E-mail
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
           </label>
           <label className="grid gap-2 text-sm font-semibold">
             Mot de passe
-            <input
-              className="rounded-2xl border border-slate-300 px-4 py-3 font-normal"
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required />
           </label>
 
-          {error ? <p className="rounded-2xl bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</p> : null}
+          {error ? <p className="rounded-2xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">{error}</p> : null}
 
           <button className="btn-primary mt-2" disabled={loading} type="submit">
             {loading ? "Connexion..." : "Se connecter"}
           </button>
           <button className="btn-secondary" type="button" onClick={() => router.push("/register")}>
-            Creer un compte
+            Créer un compte
           </button>
         </form>
       </div>

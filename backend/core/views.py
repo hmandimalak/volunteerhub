@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
@@ -16,6 +17,7 @@ from .models import (
     Certificate,
     Event,
     EventCategory,
+    EventImage,
     Evaluation,
     Message,
     Mission,
@@ -27,12 +29,14 @@ from .models import (
     Skill,
     User,
     Volunteer,
+    VolunteerBadge,
     VolunteerSkill,
 )
 from .permissions import (
     IsAdmin,
     IsOrganisation,
     IsVerifiedOrganisation,
+    IsVerifiedOrganisationOperator,
     OrganisationOwnerOrAdmin,
     ReadOnlyOrAuthenticated,
 )
@@ -55,16 +59,27 @@ from .serializers import (
     ReportSerializer,
     SkillSerializer,
     UserSerializer,
+    VolunteerBadgeSerializer,
     VolunteerSerializer,
     VolunteerSkillSerializer,
 )
 from .services import (
+    archive_expired_events,
+    award_badges_for_volunteer,
+    award_badge,
     build_excel_workbook,
     build_organisation_report_pdf,
+    build_badge_progress,
+    calculate_volunteer_hours,
+    count_completed_events,
     ensure_attendance_qr,
+    ensure_default_badges,
     generate_qr_png,
+    get_platform_stats,
     save_certificate,
     send_attendance_qr_email,
+    sync_mission_dates_for_event,
+    _mission_hours,
 )
 
 
@@ -72,6 +87,8 @@ class RegisterViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    authentication_classes = []
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -115,6 +132,18 @@ class OrganisationViewSet(viewsets.ModelViewSet):
                     Organisation.ValidationStatus.NEEDS_MORE_DOCUMENTS,
                 ]
             )
+        search = self.request.query_params.get("search")
+        status_filter = self.request.query_params.get("status")
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(category_type__icontains=search)
+                | Q(user__email__icontains=search)
+                | Q(city__icontains=search)
+                | Q(sector__icontains=search)
+            )
+        if status_filter:
+            queryset = queryset.filter(validation_status=status_filter)
         return queryset
 
     def perform_create(self, serializer):
@@ -277,7 +306,17 @@ class OrganisationViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Vous ne pouvez consulter que vos propres evenements."}, status=403)
         if request.user.role not in [User.Role.ADMIN, User.Role.ORGANISATION] and not request.user.is_staff:
             return Response({"detail": "Action reservee aux administrateurs et organisations."}, status=403)
+        archive_expired_events()
         events = Event.objects.filter(organisation=organisation).select_related("organisation", "category").prefetch_related("missions")
+        archived = request.query_params.get("archived")
+        now = timezone.now()
+        if archived == "true":
+            events = events.filter(Q(ends_at__lt=now) | Q(status=Event.Status.FINISHED))
+        else:
+            events = events.filter(
+                ends_at__gte=now,
+                status__in=[Event.Status.PUBLISHED, Event.Status.ACTIVE, Event.Status.FULL, Event.Status.DRAFT],
+            )
         return Response(EventSerializer(events.order_by("-starts_at"), many=True).data)
 
     def _can_access_exports(self, request, organisation):
@@ -391,6 +430,47 @@ class VolunteerViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Cet utilisateur possede deja un profil benevole.")
         serializer.save(user=self.request.user)
 
+    @action(detail=False, methods=["get", "patch"], permission_classes=[IsAuthenticated], url_path="me")
+    def me(self, request):
+        volunteer = getattr(request.user, "volunteer", None)
+        if not volunteer:
+            return Response({"detail": "Aucun profil bénévole lié à cet utilisateur."}, status=404)
+        if request.method == "PATCH":
+            serializer = self.get_serializer(volunteer, data=request.data, partial=True, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            volunteer.refresh_from_db()
+            return Response(self.get_serializer(volunteer, context={"request": request}).data)
+        return Response(self.get_serializer(volunteer, context={"request": request}).data)
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/badges")
+    def my_badges(self, request):
+        if request.user.role != User.Role.VOLUNTEER:
+            return Response({"detail": "Reserve aux benevoles."}, status=403)
+        badges = VolunteerBadge.objects.filter(volunteer=request.user.volunteer).select_related("badge")
+        return Response(VolunteerBadgeSerializer(badges, many=True).data)
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/badges-progress")
+    def badges_progress(self, request):
+        if request.user.role != User.Role.VOLUNTEER:
+            return Response({"detail": "Réservé aux bénévoles."}, status=403)
+        volunteer = getattr(request.user, "volunteer", None)
+        if not volunteer:
+            return Response({"detail": "Aucun profil bénévole lié à cet utilisateur."}, status=404)
+        payload = []
+        for item in build_badge_progress(volunteer):
+            payload.append(
+                {
+                    "badge": BadgeSerializer(item["badge"]).data,
+                    "earned": item["earned"],
+                    "awarded_at": item["awarded_at"],
+                    "current": item["current"],
+                    "target": item["target"],
+                    "progress_label": item["progress_label"],
+                }
+            )
+        return Response(payload)
+
 
 class SkillViewSet(viewsets.ModelViewSet):
     queryset = Skill.objects.all().order_by("name")
@@ -427,7 +507,7 @@ class EventCategoryViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ["create", "update", "partial_update", "destroy"]:
-            return [IsAdmin()]
+            return [IsVerifiedOrganisation()]
         return super().get_permissions()
 
 
@@ -437,21 +517,65 @@ class EventViewSet(viewsets.ModelViewSet):
     permission_classes = [ReadOnlyOrAuthenticated, OrganisationOwnerOrAdmin]
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy"]:
+        if self.action in ["create", "update", "partial_update"]:
+            return [IsVerifiedOrganisationOperator(), OrganisationOwnerOrAdmin()]
+        if self.action == "destroy":
             return [IsVerifiedOrganisation(), OrganisationOwnerOrAdmin()]
         return super().get_permissions()
 
     def get_queryset(self):
+        archive_expired_events()
         queryset = super().get_queryset()
         category = self.request.query_params.get("category")
         city = self.request.query_params.get("city")
         status_filter = self.request.query_params.get("status")
+        search = self.request.query_params.get("search")
+        organisation = self.request.query_params.get("organisation")
+        archived = self.request.query_params.get("archived")
+        now = timezone.now()
+        user = self.request.user
+        detail_actions = {
+            "retrieve",
+            "update",
+            "partial_update",
+            "destroy",
+            "event_details",
+            "volunteers",
+            "missions",
+            "generate_certificates",
+            "upload_images",
+        }
+        manage_detail = self.action in detail_actions and user.is_authenticated and (
+            user.role == User.Role.ADMIN or user.is_staff or user.is_superuser or user.role == User.Role.ORGANISATION
+        )
+        if manage_detail and user.role == User.Role.ORGANISATION:
+            queryset = queryset.filter(organisation__user=user)
+
+        if not manage_detail:
+            if archived == "true":
+                queryset = queryset.filter(Q(ends_at__lt=now) | Q(status=Event.Status.FINISHED))
+            else:
+                queryset = queryset.filter(
+                    ends_at__gte=now,
+                    status__in=[Event.Status.PUBLISHED, Event.Status.ACTIVE, Event.Status.FULL],
+                )
+
         if category:
             queryset = queryset.filter(category_id=category)
         if city:
             queryset = queryset.filter(city__icontains=city)
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+        if organisation:
+            queryset = queryset.filter(organisation_id=organisation)
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(description__icontains=search)
+                | Q(city__icontains=search)
+                | Q(organisation__name__icontains=search)
+                | Q(category__name__icontains=search)
+            )
         return queryset.order_by("starts_at")
 
     def perform_create(self, serializer):
@@ -459,10 +583,58 @@ class EventViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Votre organisation doit etre approuvee avant de creer des evenements.")
         serializer.save(organisation=self.request.user.organisation)
 
+    def perform_update(self, serializer):
+        old_event = self.get_object()
+        old_starts = old_event.starts_at
+        old_ends = old_event.ends_at
+        event = serializer.save()
+        if event.starts_at != old_starts or event.ends_at != old_ends:
+            sync_mission_dates_for_event(event)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsVerifiedOrganisationOperator, OrganisationOwnerOrAdmin], url_path="images")
+    def upload_images(self, request, pk=None):
+        try:
+            event = Event.objects.select_related("organisation").get(pk=pk)
+        except Event.DoesNotExist:
+            return Response({"detail": "Evenement introuvable."}, status=404)
+        if request.user.role == User.Role.ORGANISATION and event.organisation.user_id != request.user.id:
+            return Response({"detail": "Vous ne pouvez modifier que vos propres evenements."}, status=403)
+        files = request.FILES.getlist("images")
+        if "image" in request.FILES:
+            files = list(files) + [request.FILES["image"]]
+        if not files:
+            return Response({"detail": "Ajoutez au moins une image."}, status=400)
+        created = [EventImage.objects.create(event=event, image=image, order=index) for index, image in enumerate(files)]
+        return Response({"count": len(created)}, status=201)
+
     @action(detail=False, methods=["get"])
     def near(self, request):
         # MVP approximation: precise radius search can move to PostGIS when geospatial indexes are added.
         return self.list(request)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="details")
+    def event_details(self, request, pk=None):
+        event = self.get_object()
+        if request.user.role == User.Role.ORGANISATION and event.organisation.user_id != request.user.id:
+            return Response({"detail": "Vous ne pouvez consulter que vos propres evenements."}, status=403)
+        applications = Application.objects.filter(mission__event=event, status=Application.Status.ACCEPTED)
+        attendances = Attendance.objects.filter(application__in=applications)
+        attended_count = attendances.filter(status__in=[Attendance.Status.ATTENDED, Attendance.Status.COMPLETED]).count()
+        absent_count = attendances.filter(status=Attendance.Status.ABSENT).count()
+        return Response(
+            {
+                "event": EventSerializer(event, context={"request": request}).data,
+                "missions": MissionSerializer(event.missions.all(), many=True).data,
+                "registered_volunteers": applications.count(),
+                "attendance_stats": {
+                    "confirmed": attendances.filter(status=Attendance.Status.CONFIRMED).count(),
+                    "attended": attended_count,
+                    "absent": absent_count,
+                    "completed": attendances.filter(status=Attendance.Status.COMPLETED).count(),
+                    "attendance_rate": round((attended_count / applications.count()) * 100, 1) if applications.count() else 0,
+                },
+            }
+        )
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="volunteers")
     def volunteers(self, request, pk=None):
@@ -490,8 +662,12 @@ class EventViewSet(viewsets.ModelViewSet):
                 {
                     "application_id": application.id,
                     "volunteer": VolunteerSerializer(application.volunteer).data,
+                    "volunteer_id": application.volunteer_id,
+                    "mission_id": application.mission_id,
                     "mission_name": application.mission.name,
                     "participation_status": attendance.status,
+                    "hours": round(_mission_hours(application), 1),
+                    "confirmed_hours": attendance.confirmed_hours,
                     "qr_token": str(attendance.qr_token),
                     "arrived_at": attendance.arrived_at,
                     "departed_at": attendance.departed_at,
@@ -500,19 +676,47 @@ class EventViewSet(viewsets.ModelViewSet):
             )
         return Response(participants)
 
+    @action(detail=True, methods=["post"], permission_classes=[IsVerifiedOrganisationOperator], url_path="generate-certificates")
+    def generate_certificates(self, request, pk=None):
+        event = self.get_object()
+        if event.organisation.user_id != request.user.id:
+            return Response({"detail": "Vous ne pouvez générer des attestations que pour vos événements."}, status=403)
+        if not request.user.organisation.is_verified:
+            return Response({"detail": "Votre organisation doit être approuvée."}, status=403)
+
+        application_ids = request.data.get("application_ids") or []
+        applications = Application.objects.filter(mission__event=event, status=Application.Status.ACCEPTED).select_related(
+            "volunteer", "volunteer__user", "mission", "mission__event", "attendance"
+        )
+        if application_ids:
+            applications = applications.filter(id__in=application_ids)
+
+        generated = 0
+        skipped = 0
+        for application in applications:
+            certificate = save_certificate(application)
+            if certificate:
+                generated += 1
+            else:
+                skipped += 1
+        return Response({"generated": generated, "skipped": skipped})
+
     @action(detail=True, methods=["get", "post"], permission_classes=[ReadOnlyOrAuthenticated])
     def missions(self, request, pk=None):
         event = self.get_object()
         if request.method == "POST":
-            if request.user.role == User.Role.ORGANISATION:
-                if event.organisation.user_id != request.user.id:
-                    return Response({"detail": "Vous ne pouvez ajouter des missions qu'a vos propres evenements."}, status=403)
-                if not request.user.organisation.is_verified:
-                    return Response({"detail": "Votre organisation doit etre approuvee avant de creer des missions."}, status=403)
-            elif request.user.role != User.Role.ADMIN and not request.user.is_staff:
-                return Response({"detail": "Action reservee aux organisations approuvees."}, status=403)
+            if request.user.role != User.Role.ORGANISATION:
+                return Response({"detail": "Seule l'organisation propriétaire peut créer des missions."}, status=403)
+            if event.organisation.user_id != request.user.id:
+                return Response({"detail": "Vous ne pouvez ajouter des missions qu'a vos propres evenements."}, status=403)
+            if not request.user.organisation.is_verified:
+                return Response({"detail": "Votre organisation doit etre approuvee avant de creer des missions."}, status=403)
             payload = request.data.copy()
             payload["event"] = event.id
+            if not payload.get("starts_at"):
+                payload["starts_at"] = event.starts_at.isoformat()
+            if not payload.get("ends_at"):
+                payload["ends_at"] = event.ends_at.isoformat()
             serializer = MissionSerializer(data=payload)
             serializer.is_valid(raise_exception=True)
             serializer.save(event=event)
@@ -527,7 +731,7 @@ class MissionViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ["create", "update", "partial_update", "destroy"]:
-            return [IsVerifiedOrganisation(), OrganisationOwnerOrAdmin()]
+            return [IsVerifiedOrganisationOperator(), OrganisationOwnerOrAdmin()]
         return super().get_permissions()
 
     def get_queryset(self):
@@ -551,21 +755,53 @@ class MissionViewSet(viewsets.ModelViewSet):
         mission = self.get_object()
         if request.user.role != User.Role.VOLUNTEER:
             return Response({"detail": "Seuls les benevoles peuvent candidater."}, status=403)
-        application, created = Application.objects.get_or_create(
+
+        existing = Application.objects.filter(volunteer=request.user.volunteer, mission=mission).first()
+        if existing:
+            if existing.status in [Application.Status.PENDING, Application.Status.ACCEPTED, Application.Status.WAITLISTED]:
+                return Response(
+                    {"detail": "Vous avez deja une candidature active pour cette mission.", "application": ApplicationSerializer(existing).data},
+                    status=400,
+                )
+            if existing.status == Application.Status.REJECTED:
+                existing.status = Application.Status.PENDING
+                existing.answered_at = None
+                existing.applied_at = timezone.now()
+                existing.save(update_fields=["status", "answered_at", "applied_at"])
+                return Response(ApplicationSerializer(existing).data, status=status.HTTP_200_OK)
+            if existing.status == Application.Status.CANCELLED:
+                existing.status = Application.Status.PENDING
+                existing.answered_at = None
+                existing.save(update_fields=["status", "answered_at"])
+                return Response(ApplicationSerializer(existing).data, status=status.HTTP_200_OK)
+
+        application = Application.objects.create(
             volunteer=request.user.volunteer,
             mission=mission,
-            defaults={"status": Application.Status.PENDING},
+            status=Application.Status.PENDING,
         )
-        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        return Response(ApplicationSerializer(application).data, status=response_status)
+        return Response(ApplicationSerializer(application).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=["get"], permission_classes=[IsOrganisation], url_path="candidatures")
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="my-application")
+    def my_application(self, request, pk=None):
+        mission = self.get_object()
+        if request.user.role != User.Role.VOLUNTEER:
+            return Response({"detail": "Reserve aux benevoles."}, status=403)
+        application = Application.objects.filter(volunteer=request.user.volunteer, mission=mission).first()
+        if not application:
+            return Response({"status": "none"})
+        return Response(ApplicationSerializer(application).data)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="candidatures")
     def applications(self, request, pk=None):
         mission = self.get_object()
-        if mission.event.organisation.user_id != request.user.id:
-            return Response({"detail": "Vous ne pouvez consulter que vos propres candidatures."}, status=403)
-        if not request.user.organisation.is_verified:
-            return Response({"detail": "Votre organisation doit etre approuvee."}, status=403)
+        if request.user.role == User.Role.ORGANISATION:
+            if mission.event.organisation.user_id != request.user.id:
+                return Response({"detail": "Vous ne pouvez consulter que vos propres candidatures."}, status=403)
+            if not request.user.organisation.is_verified:
+                return Response({"detail": "Votre organisation doit etre approuvee."}, status=403)
+        elif request.user.role != User.Role.ADMIN and not request.user.is_staff:
+            return Response({"detail": "Action réservée aux administrateurs et organisations."}, status=403)
         applications = mission.applications.select_related("volunteer", "mission")
         return Response(ApplicationSerializer(applications, many=True).data)
 
@@ -588,7 +824,7 @@ class MissionSkillViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ["create", "update", "partial_update", "destroy"]:
-            return [IsVerifiedOrganisation(), OrganisationOwnerOrAdmin()]
+            return [IsVerifiedOrganisationOperator(), OrganisationOwnerOrAdmin()]
         return super().get_permissions()
 
     def perform_create(self, serializer):
@@ -606,28 +842,31 @@ class ApplicationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        queryset = Application.objects.all()
         if self.request.user.role == User.Role.VOLUNTEER:
             queryset = Application.objects.filter(volunteer__user=self.request.user)
-        if self.request.user.role == User.Role.ORGANISATION:
+        elif self.request.user.role == User.Role.ORGANISATION:
             queryset = Application.objects.filter(mission__event__organisation__user=self.request.user)
-        if self.request.user.role == User.Role.ADMIN or self.request.user.is_staff or self.request.user.is_superuser:
-            queryset = Application.objects.all()
+        elif self.request.user.role != User.Role.ADMIN and not self.request.user.is_staff and not self.request.user.is_superuser:
+            queryset = Application.objects.none()
         status_filter = self.request.query_params.get("status")
+        mission_filter = self.request.query_params.get("mission")
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+        if mission_filter:
+            queryset = queryset.filter(mission_id=mission_filter)
         return queryset.select_related("volunteer", "volunteer__user", "mission", "mission__event").prefetch_related("volunteer__skills__skill")
 
     def _can_manage_application(self, request, application):
-        if request.user.role == User.Role.ADMIN or request.user.is_staff or request.user.is_superuser:
-            return True
         organisation = getattr(request.user, "organisation", None)
         return bool(
-            organisation
+            request.user.role == User.Role.ORGANISATION
+            and organisation
             and organisation.is_verified
             and application.mission.event.organisation.user_id == request.user.id
         )
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="accepter")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="accepter")
     def accept(self, request, pk=None):
         application = self.get_object()
         if not self._can_manage_application(request, application):
@@ -647,9 +886,39 @@ class ApplicationViewSet(viewsets.ModelViewSet):
         Notification.objects.create(
             user=application.volunteer.user,
             type="application_accepted",
-            content=f"Votre candidature pour la mission {application.mission.name} a ete acceptee.",
+            content="Votre candidature a été acceptée !",
         )
         return Response(self.get_serializer(application).data)
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my-qr-codes")
+    def my_qr_codes(self, request):
+        if request.user.role != User.Role.VOLUNTEER:
+            return Response({"detail": "Reserve aux benevoles."}, status=403)
+        applications = (
+            Application.objects.filter(volunteer=request.user.volunteer, status=Application.Status.ACCEPTED)
+            .select_related("mission", "mission__event", "attendance")
+            .order_by("mission__starts_at")
+        )
+        qr_codes = []
+        for application in applications:
+            attendance, _ = Attendance.objects.get_or_create(
+                application=application,
+                defaults={"status": Attendance.Status.CONFIRMED},
+            )
+            ensure_attendance_qr(attendance)
+            qr_codes.append(
+                {
+                    "application_id": application.id,
+                    "event_title": application.mission.event.title,
+                    "mission_name": application.mission.name,
+                    "event_date": application.mission.event.starts_at,
+                    "city": application.mission.event.city,
+                    "qr_token": str(attendance.qr_token),
+                    "attendance_status": attendance.status,
+                    "arrived_at": attendance.arrived_at,
+                }
+            )
+        return Response(qr_codes)
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="qr-code")
     def qr_code(self, request, pk=None):
@@ -677,10 +946,11 @@ class ApplicationViewSet(viewsets.ModelViewSet):
     def certificate(self, request, pk=None):
         application = self.get_object()
         can_generate = (
-            request.user.role == User.Role.ADMIN
-            or request.user.is_staff
-            or application.volunteer.user_id == request.user.id
-            or application.mission.event.organisation.user_id == request.user.id
+            application.volunteer.user_id == request.user.id
+            or (
+                request.user.role == User.Role.ORGANISATION
+                and application.mission.event.organisation.user_id == request.user.id
+            )
         )
         if not can_generate:
             return Response({"detail": "Vous ne pouvez generer que vos propres certificats."}, status=403)
@@ -688,9 +958,11 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             attendance = application.attendance
         except Attendance.DoesNotExist:
             attendance = None
-        if not attendance or attendance.status != Attendance.Status.COMPLETED:
-            return Response({"detail": "Le certificat est disponible apres une participation marquee comme terminee."}, status=400)
+        if not attendance or attendance.status not in [Attendance.Status.ATTENDED, Attendance.Status.COMPLETED]:
+            return Response({"detail": "Le certificat est disponible apres confirmation de presence."}, status=400)
         certificate = save_certificate(application)
+        if not certificate:
+            return Response({"detail": "Impossible de generer le certificat."}, status=400)
         return FileResponse(certificate.pdf.open("rb"), as_attachment=True, filename=f"certificat-{application.id}.pdf")
 
     def _set_attendance_status(self, request, application, attendance_status, notification_type, content, timestamps=None):
@@ -704,6 +976,12 @@ class ApplicationViewSet(viewsets.ModelViewSet):
         )
         attendance.status = attendance_status
         attendance.validated_by = request.user
+        hours = request.data.get("hours")
+        if hours not in (None, ""):
+            try:
+                attendance.confirmed_hours = float(hours)
+            except (TypeError, ValueError):
+                return Response({"detail": "Le nombre d'heures est invalide."}, status=400)
         if timestamps:
             for field, value in timestamps.items():
                 setattr(attendance, field, value)
@@ -713,11 +991,12 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             type=notification_type,
             content=content,
         )
-        if attendance_status == Attendance.Status.COMPLETED:
+        if attendance_status in [Attendance.Status.ATTENDED, Attendance.Status.COMPLETED]:
             save_certificate(application)
+            award_badges_for_volunteer(application.volunteer, application.mission.event.organisation)
         return Response(AttendanceSerializer(attendance).data)
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="confirm-participation")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="confirm-participation")
     def confirm_participation(self, request, pk=None):
         application = self.get_object()
         return self._set_attendance_status(
@@ -728,7 +1007,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             f"Votre participation a la mission {application.mission.name} est confirmee.",
         )
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="mark-attended")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="mark-attended")
     def mark_attended(self, request, pk=None):
         application = self.get_object()
         return self._set_attendance_status(
@@ -740,7 +1019,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             timestamps={"arrived_at": timezone.now()},
         )
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="mark-completed")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="mark-completed")
     def mark_completed(self, request, pk=None):
         application = self.get_object()
         return self._set_attendance_status(
@@ -752,7 +1031,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             timestamps={"departed_at": timezone.now()},
         )
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="mark-absent")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="mark-absent")
     def mark_absent(self, request, pk=None):
         application = self.get_object()
         return self._set_attendance_status(
@@ -763,7 +1042,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
             f"Votre absence a la mission {application.mission.name} a ete enregistree.",
         )
 
-    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisation], url_path="refuser")
+    @action(detail=True, methods=["patch"], permission_classes=[IsVerifiedOrganisationOperator], url_path="refuser")
     def reject(self, request, pk=None):
         application = self.get_object()
         if not self._can_manage_application(request, application):
@@ -790,6 +1069,7 @@ class ApplicationViewSet(viewsets.ModelViewSet):
 class NotificationViewSet(viewsets.ModelViewSet):
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         return Notification.objects.filter(user=self.request.user).order_by("-created_at")
@@ -800,6 +1080,11 @@ class NotificationViewSet(viewsets.ModelViewSet):
         notification.read = True
         notification.save(update_fields=["read"])
         return Response(self.get_serializer(notification).data)
+
+    @action(detail=False, methods=["patch"], url_path="tout-lire")
+    def mark_all_read(self, request):
+        updated = self.get_queryset().filter(read=False).update(read=True)
+        return Response({"updated": updated})
 
 
 class MessageViewSet(viewsets.ModelViewSet):
@@ -843,15 +1128,48 @@ class ReportViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(report).data)
 
 
-class BadgeViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Badge.objects.all()
+class BadgeViewSet(viewsets.ModelViewSet):
+    queryset = Badge.objects.select_related("organisation").all()
     serializer_class = BadgeSerializer
     permission_classes = [ReadOnlyOrAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsVerifiedOrganisationOperator()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        ensure_default_badges()
+        queryset = super().get_queryset()
+        organisation_id = self.request.query_params.get("organisation")
+        if organisation_id:
+            queryset = queryset.filter(Q(organisation_id=organisation_id) | Q(organisation__isnull=True))
+        return queryset.filter(is_active=True)
+
+    def perform_create(self, serializer):
+        organisation = getattr(self.request.user, "organisation", None)
+        serializer.save(organisation=organisation)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsVerifiedOrganisationOperator], url_path="award")
+    def award_manual(self, request, pk=None):
+        badge = self.get_object()
+        volunteer_id = request.data.get("volunteer_id")
+        if not volunteer_id:
+            return Response({"detail": "volunteer_id requis."}, status=400)
+        try:
+            volunteer = Volunteer.objects.get(pk=volunteer_id)
+        except Volunteer.DoesNotExist:
+            return Response({"detail": "Benevole introuvable."}, status=404)
+        result = award_badge(volunteer, badge)
+        if not result:
+            return Response({"detail": "Badge deja attribue."}, status=400)
+        return Response(VolunteerBadgeSerializer(result).data, status=status.HTTP_201_CREATED)
 
 
 class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CertificateSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         return Certificate.objects.filter(volunteer__user=self.request.user)
@@ -909,7 +1227,9 @@ def organisation_stats(request, pk):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def volunteer_stats(request):
+    ensure_default_badges()
     volunteer = request.user.volunteer
+
     return Response(
         {
             "points": volunteer.total_points,
@@ -917,6 +1237,8 @@ def volunteer_stats(request):
             "accepted_applications": volunteer.applications.filter(status=Application.Status.ACCEPTED).count(),
             "certificates": volunteer.certificates.count(),
             "badges": volunteer.badges.count(),
+            "hours": round(calculate_volunteer_hours(volunteer), 1),
+            "completed_events": count_completed_events(volunteer),
         }
     )
 
@@ -964,12 +1286,62 @@ def scan_attendance_qr(request):
     attendance.validation_method = Attendance.Method.QR_CODE
     attendance.validated_by = request.user
     attendance.save(update_fields=["status", "arrived_at", "validation_method", "validated_by"])
+    save_certificate(application)
+    award_badges_for_volunteer(application.volunteer, application.mission.event.organisation)
     Notification.objects.create(
         user=application.volunteer.user,
         type="attendance_qr_scanned",
         content=f"Votre presence a la mission {application.mission.name} a ete validee par QR Code.",
     )
-    return Response(AttendanceSerializer(attendance).data)
+    return Response(
+        {
+            **AttendanceSerializer(attendance).data,
+            "volunteer_name": str(application.volunteer),
+            "event_title": application.mission.event.title,
+            "mission_name": application.mission.name,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def platform_stats(request):
+    return Response(get_platform_stats())
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def featured_recommendations(request):
+    archive_expired_events()
+    limit = int(request.query_params.get("limit", 6))
+
+    if request.user.is_authenticated and request.user.role == User.Role.VOLUNTEER:
+        return mission_recommendations(request)
+
+    now = timezone.now()
+    events = (
+        Event.objects.filter(
+            ends_at__gte=now,
+            status__in=[Event.Status.PUBLISHED, Event.Status.ACTIVE],
+        )
+        .select_related("organisation", "category")
+        .prefetch_related("missions")
+        .order_by("starts_at")[:limit]
+    )
+    recommendations = []
+    for event in events:
+        mission = event.missions.filter(status=Mission.Status.OPEN).first() or event.missions.first()
+        if not mission:
+            continue
+        recommendations.append(
+            {
+                "mission": MissionSerializer(mission).data,
+                "event": EventSerializer(event).data,
+                "score": 0,
+                "reasons": ["Evenement ouvert aux benevoles"],
+            }
+        )
+    return Response(recommendations)
 
 
 def _mission_recommendation_score(volunteer, mission, previous_category_ids):
@@ -1046,7 +1418,11 @@ def mission_recommendations(request):
         ).values_list("mission__event__category_id", flat=True)
     )
     missions = (
-        Mission.objects.filter(status=Mission.Status.OPEN, event__status__in=[Event.Status.PUBLISHED, Event.Status.ACTIVE])
+        Mission.objects.filter(
+            status=Mission.Status.OPEN,
+            event__status__in=[Event.Status.PUBLISHED, Event.Status.ACTIVE],
+            event__ends_at__gte=timezone.now(),
+        )
         .exclude(id__in=existing_application_ids)
         .select_related("event", "event__category", "event__organisation")
         .prefetch_related("required_skills__skill")

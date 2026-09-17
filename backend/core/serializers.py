@@ -38,6 +38,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 class RegisterSerializer(serializers.ModelSerializer):
     username = serializers.CharField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, min_length=8)
     phone_number = serializers.CharField(required=False, allow_blank=True)
 
@@ -47,7 +48,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     organisation_address = serializers.CharField(write_only=True, required=False, allow_blank=True)
     organisation_city = serializers.CharField(write_only=True, required=False, allow_blank=True)
     organisation_country = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    organisation_website = serializers.URLField(write_only=True, required=False, allow_blank=True)
+    organisation_website = serializers.CharField(write_only=True, required=False, allow_blank=True)
     organisation_document = serializers.FileField(write_only=True, required=False)
     organisation_documents = serializers.ListField(
         child=serializers.FileField(),
@@ -58,7 +59,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     first_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     last_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    birth_date = serializers.DateField(write_only=True, required=False)
+    birth_date = serializers.DateField(write_only=True, required=False, allow_null=True)
     volunteer_address = serializers.CharField(write_only=True, required=False, allow_blank=True)
     volunteer_city = serializers.CharField(write_only=True, required=False, allow_blank=True)
     volunteer_interests = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -99,6 +100,21 @@ class RegisterSerializer(serializers.ModelSerializer):
             "profile_picture",
             "skills",
         ]
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("Un compte existe déjà avec cet e-mail.")
+        return email
+
+    def to_internal_value(self, data):
+        if hasattr(data, "copy"):
+            data = data.copy()
+            for key in list(data.keys()):
+                values = data.getlist(key) if hasattr(data, "getlist") else [data.get(key)]
+                if values == [""] or values == [None]:
+                    data.pop(key)
+        return super().to_internal_value(data)
 
     def validate_role(self, value):
         if value == User.Role.ADMIN:
@@ -150,8 +166,16 @@ class RegisterSerializer(serializers.ModelSerializer):
         skills = validated_data.pop("skills", [])
 
         with transaction.atomic():
+            email = validated_data["email"].strip().lower()
+            validated_data["email"] = email
             if not validated_data.get("username"):
-                validated_data["username"] = validated_data["email"].split("@")[0]
+                base = email.split("@")[0][:30] or "utilisateur"
+                username = base
+                suffix = 1
+                while User.objects.filter(username=username).exists():
+                    username = f"{base}{suffix}"
+                    suffix += 1
+                validated_data["username"] = username
             user = User(**validated_data)
             user.set_password(password)
             if user.role == User.Role.ORGANISATION:
@@ -238,10 +262,37 @@ class OrganisationSerializer(serializers.ModelSerializer):
 class VolunteerSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     skills_summary = serializers.SerializerMethodField()
+    photo_url = serializers.SerializerMethodField()
+    phone_number = serializers.CharField(source="user.phone_number", required=False, allow_blank=True)
+    skill_names = serializers.ListField(child=serializers.CharField(), write_only=True, required=False)
 
     class Meta:
         model = Volunteer
-        fields = "__all__"
+        fields = [
+            "id",
+            "user",
+            "first_name",
+            "last_name",
+            "birth_date",
+            "bio",
+            "photo",
+            "photo_url",
+            "address",
+            "city",
+            "interests",
+            "availability_notes",
+            "latitude",
+            "longitude",
+            "level",
+            "total_points",
+            "show_in_leaderboard",
+            "emergency_contact_name",
+            "emergency_contact_phone",
+            "skills_summary",
+            "phone_number",
+            "skill_names",
+        ]
+        read_only_fields = ["id", "user", "level", "total_points"]
 
     def get_skills_summary(self, obj):
         return [
@@ -251,6 +302,35 @@ class VolunteerSerializer(serializers.ModelSerializer):
             }
             for volunteer_skill in obj.skills.select_related("skill").all()
         ]
+
+    def get_photo_url(self, obj):
+        if not obj.photo:
+            return None
+        request = self.context.get("request")
+        url = obj.photo.url
+        return request.build_absolute_uri(url) if request else url
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop("user", {})
+        skill_names = validated_data.pop("skill_names", None)
+        volunteer = super().update(instance, validated_data)
+        if "phone_number" in user_data:
+            volunteer.user.phone_number = user_data.get("phone_number") or ""
+            volunteer.user.save(update_fields=["phone_number"])
+        if skill_names is not None:
+            normalized = [name.strip() for name in skill_names if name.strip()]
+            current = {item.skill.name: item for item in volunteer.skills.select_related("skill").all()}
+            for name in normalized:
+                if name in current:
+                    continue
+                skill, _created = Skill.objects.get_or_create(name=name)
+                VolunteerSkill.objects.get_or_create(
+                    volunteer=volunteer,
+                    skill=skill,
+                    defaults={"level": VolunteerSkill.SkillLevel.BEGINNER},
+                )
+            volunteer.skills.exclude(skill__name__in=normalized).delete()
+        return volunteer
 
 
 class SkillSerializer(serializers.ModelSerializer):
@@ -291,11 +371,29 @@ class MissionSkillSerializer(serializers.ModelSerializer):
 
 class MissionSerializer(serializers.ModelSerializer):
     remaining_places = serializers.IntegerField(read_only=True)
+    registered_volunteers_count = serializers.SerializerMethodField()
     required_skills = MissionSkillSerializer(many=True, read_only=True)
 
     class Meta:
         model = Mission
         fields = "__all__"
+
+    def get_registered_volunteers_count(self, obj):
+        return obj.applications.filter(status=Application.Status.ACCEPTED).count()
+
+    def validate(self, attrs):
+        event = attrs.get("event") or (self.instance.event if self.instance else None)
+        if not event:
+            return attrs
+        starts_at = attrs.get("starts_at") or (self.instance.starts_at if self.instance else event.starts_at)
+        ends_at = attrs.get("ends_at") or (self.instance.ends_at if self.instance else event.ends_at)
+        if starts_at < event.starts_at or ends_at > event.ends_at:
+            raise serializers.ValidationError("Les horaires de la mission doivent rester dans la période de l'événement.")
+        if ends_at <= starts_at:
+            raise serializers.ValidationError("L'heure de fin doit être postérieure à l'heure de début.")
+        attrs["starts_at"] = starts_at
+        attrs["ends_at"] = ends_at
+        return attrs
 
 
 class EventSerializer(serializers.ModelSerializer):
@@ -371,9 +469,12 @@ class EvaluationSerializer(serializers.ModelSerializer):
 
 
 class BadgeSerializer(serializers.ModelSerializer):
+    organisation_name = serializers.CharField(source="organisation.name", read_only=True)
+
     class Meta:
         model = Badge
         fields = "__all__"
+        read_only_fields = ["organisation"]
 
 
 class VolunteerBadgeSerializer(serializers.ModelSerializer):
@@ -385,10 +486,23 @@ class VolunteerBadgeSerializer(serializers.ModelSerializer):
 
 
 class CertificateSerializer(serializers.ModelSerializer):
+    event_title = serializers.CharField(source="event.title", read_only=True)
+    event_date = serializers.DateTimeField(source="event.starts_at", read_only=True)
+    volunteer_name = serializers.SerializerMethodField()
+    organisation_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Certificate
         fields = "__all__"
-        read_only_fields = ["volunteer", "generated_at"]
+        read_only_fields = ["volunteer", "generated_at", "verification_id"]
+
+    def get_organisation_name(self, obj):
+        if obj.event and obj.event.organisation:
+            return obj.event.organisation.name
+        return ""
+
+    def get_volunteer_name(self, obj):
+        return str(obj.volunteer)
 
 
 class NotificationSerializer(serializers.ModelSerializer):

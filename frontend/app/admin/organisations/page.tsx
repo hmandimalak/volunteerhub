@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Building2, CalendarDays, FileWarning, ShieldCheck, Users } from "lucide-react";
 import {
   Event,
   EventVolunteer,
@@ -8,31 +9,78 @@ import {
   OrganisationSummary,
   PaginatedResponse,
   formatDate,
-  unwrapResults
+  unwrapResults,
 } from "@/lib/api";
 import { authedFetch } from "@/lib/browser-api";
 import { StatusMessage } from "@/components/StatusMessage";
-import { RoleGate } from "@/components/RoleGate";
+import { labelStatus } from "@/lib/labels";
+import {
+  AdminPageHeader,
+  AdminPagination,
+  AdminSearch,
+  AdminTable,
+  AdminTabs,
+  ConfirmDialog,
+  GlassCard,
+  SlideOver,
+  StatCard,
+  StatusBadge,
+  paginate,
+} from "@/components/admin";
+
+const PAGE_SIZE = 8;
+
+function displayStatus(organisation: Organisation) {
+  if (organisation.validation_status === "validee") {
+    return organisation.user?.status === "suspendu" ? "Suspendue" : "Approuvée";
+  }
+  if (organisation.validation_status === "refusee") {
+    return "Refusée";
+  }
+  if (organisation.validation_status === "documents_requis") {
+    return "Documents requis";
+  }
+  return "En attente";
+}
+
+function statusTone(organisation: Organisation): "success" | "warning" | "danger" | "info" {
+  if (organisation.user?.status === "suspendu") return "danger";
+  if (organisation.validation_status === "validee") return "success";
+  if (organisation.validation_status === "refusee") return "danger";
+  if (organisation.validation_status === "documents_requis") return "info";
+  return "warning";
+}
 
 export default function AdminOrganisationsPage() {
   const [organisations, setOrganisations] = useState<Organisation[]>([]);
   const [selectedOrganisation, setSelectedOrganisation] = useState<Organisation | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<Event[]>([]);
-  const [eventsLoadedForOrganisationId, setEventsLoadedForOrganisationId] = useState<number | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [selectedEventVolunteers, setSelectedEventVolunteers] = useState<EventVolunteer[]>([]);
   const [summaries, setSummaries] = useState<Record<number, OrganisationSummary>>({});
-  const [reasons, setReasons] = useState<Record<number, string>>({});
+  const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [tab, setTab] = useState("overview");
+  const [drawerTab, setDrawerTab] = useState("general");
+  const [page, setPage] = useState(1);
+  const [pendingDelete, setPendingDelete] = useState<Organisation | null>(null);
+
+  const pendingOrganisations = organisations.filter((organisation) =>
+    ["en_attente", "documents_requis"].includes(organisation.validation_status)
+  );
+  const approvedOrganisations = organisations.filter((organisation) => organisation.validation_status === "validee");
+  const rejectedOrganisations = organisations.filter((organisation) => organisation.validation_status === "refusee");
+  const suspendedCount = approvedOrganisations.filter((organisation) => organisation.user?.status === "suspendu").length;
 
   async function loadOrganisations() {
     setLoading(true);
     setError("");
-
     try {
-      const data = await authedFetch<PaginatedResponse<Organisation> | Organisation[]>("/organisations/");
+      const query = search ? `?search=${encodeURIComponent(search)}` : "";
+      const data = await authedFetch<PaginatedResponse<Organisation> | Organisation[]>(`/organisations/${query}`);
       setOrganisations(unwrapResults(data));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Impossible de charger les organisations.");
@@ -42,372 +90,440 @@ export default function AdminOrganisationsPage() {
   }
 
   useEffect(() => {
-    loadOrganisations();
-  }, []);
+    const timeout = setTimeout(() => {
+      loadOrganisations();
+    }, 300);
+    return () => clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [tab, search]);
+
+  const visibleRows = useMemo(() => {
+    if (tab === "pending") return pendingOrganisations;
+    if (tab === "approved") return approvedOrganisations;
+    if (tab === "rejected") return rejectedOrganisations;
+    return pendingOrganisations;
+  }, [tab, pendingOrganisations, approvedOrganisations, rejectedOrganisations]);
+
+  const pagedRows = paginate(visibleRows, page, PAGE_SIZE);
 
   async function decide(id: number, action: "approve" | "reject" | "request-documents" | "suspend" | "reactivate") {
     setMessage("");
     setError("");
-
     try {
       await authedFetch(`/organisations/${id}/${action}/`, {
         method: "PATCH",
-        body: JSON.stringify({ reason: reasons[id] ?? "" })
+        body: JSON.stringify({ reason }),
       });
-      if (action === "approve") {
-        setMessage("Organisation approuvee.");
-      } else if (action === "reject") {
-        setMessage("Organisation refusee avec motif.");
-      } else if (action === "request-documents") {
-        setMessage("Documents complementaires demandes.");
-      } else if (action === "suspend") {
-        setMessage("Organisation suspendue.");
-      } else {
-        setMessage("Organisation reactivee.");
-      }
+      const messages = {
+        approve: "Organisation approuvée.",
+        reject: "Organisation refusée avec motif.",
+        "request-documents": "Documents complémentaires demandés.",
+        suspend: "Organisation suspendue.",
+        reactivate: "Organisation réactivée.",
+      };
+      setMessage(messages[action]);
+      setReason("");
       await loadOrganisations();
-      if (selectedOrganisation?.id === id) {
-        setSelectedOrganisation(null);
-        setSelectedEvents([]);
-        setEventsLoadedForOrganisationId(null);
-        setSelectedEvent(null);
-        setSelectedEventVolunteers([]);
-      }
+      closeDrawer();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Decision impossible.");
+      setError(err instanceof Error ? err.message : "Décision impossible.");
     }
   }
 
-  async function deleteOrganisation(id: number) {
-    if (!window.confirm("Supprimer cette organisation et ses donnees associees ?")) {
-      return;
-    }
-
+  async function confirmDelete() {
+    if (!pendingDelete) return;
     setMessage("");
     setError("");
     try {
-      await authedFetch(`/organisations/${id}/`, { method: "DELETE" });
-      setMessage("Organisation supprimee.");
-      if (selectedOrganisation?.id === id) {
-        setSelectedOrganisation(null);
-        setSelectedEvents([]);
-        setEventsLoadedForOrganisationId(null);
-        setSelectedEvent(null);
-        setSelectedEventVolunteers([]);
-      }
+      await authedFetch(`/organisations/${pendingDelete.id}/`, { method: "DELETE" });
+      setMessage("Organisation supprimée.");
+      setPendingDelete(null);
+      closeDrawer();
       await loadOrganisations();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Suppression impossible.");
     }
   }
 
-  async function viewDetails(organisation: Organisation) {
-    setSelectedOrganisation(organisation);
+  function closeDrawer() {
+    setSelectedOrganisation(null);
     setSelectedEvents([]);
-    setEventsLoadedForOrganisationId(null);
     setSelectedEvent(null);
     setSelectedEventVolunteers([]);
+    setDrawerTab("general");
+  }
+
+  async function openOrganisation(organisation: Organisation, nextTab = "general") {
+    setSelectedOrganisation(organisation);
+    setSelectedEvent(null);
+    setSelectedEventVolunteers([]);
+    setDrawerTab(nextTab);
+    setReason("");
     try {
       const summary = await authedFetch<OrganisationSummary>(`/organisations/${organisation.id}/summary/`);
       setSummaries((current) => ({ ...current, [organisation.id]: summary }));
+      if (nextTab === "events" || nextTab === "volunteers") {
+        const events = await authedFetch<Event[]>(`/organisations/${organisation.id}/events/`);
+        setSelectedEvents(events);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Impossible de charger les details de l'organisation.");
+      setError(err instanceof Error ? err.message : "Impossible de charger les détails de l'organisation.");
     }
   }
 
-  async function viewEvents(organisation: Organisation) {
-    setSelectedOrganisation(organisation);
-    setSelectedEvent(null);
-    setSelectedEventVolunteers([]);
+  async function loadEvents(organisation: Organisation) {
+    setDrawerTab("events");
     try {
-      const [events, summary] = await Promise.all([
-        authedFetch<Event[]>(`/organisations/${organisation.id}/events/`),
-        authedFetch<OrganisationSummary>(`/organisations/${organisation.id}/summary/`)
-      ]);
+      const events = await authedFetch<Event[]>(`/organisations/${organisation.id}/events/`);
       setSelectedEvents(events);
-      setEventsLoadedForOrganisationId(organisation.id);
-      setSummaries((current) => ({ ...current, [organisation.id]: summary }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Impossible de charger les evenements.");
+      setError(err instanceof Error ? err.message : "Impossible de charger les événements.");
     }
   }
 
-  async function viewEventVolunteers(event: Event) {
+  async function loadVolunteers(event: Event) {
     setSelectedEvent(event);
+    setDrawerTab("volunteers");
     try {
       const volunteers = await authedFetch<EventVolunteer[]>(`/evenements/${event.id}/volunteers/`);
       setSelectedEventVolunteers(volunteers);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Impossible de charger les benevoles de l'evenement.");
+      setError(err instanceof Error ? err.message : "Impossible de charger les bénévoles de l'événement.");
     }
   }
 
-  const pendingOrganisations = organisations.filter((organisation) =>
-    ["en_attente", "documents_requis"].includes(organisation.validation_status)
-  );
-  const approvedOrganisations = organisations.filter((organisation) => organisation.validation_status === "validee");
-  const rejectedOrganisations = organisations.filter((organisation) => organisation.validation_status === "refusee");
-
-  function displayStatus(organisation: Organisation) {
-    if (organisation.validation_status === "validee") {
-      if (organisation.user?.status === "suspendu") {
-        return "Suspended";
-      }
-      return "Approved";
-    }
-    if (organisation.validation_status === "refusee") {
-      return "Rejected";
-    }
-    return "Pending";
-  }
-
-  function renderOrganisationTable(title: string, description: string, items: Organisation[], mode: "pending" | "approved" | "rejected") {
-    return (
-      <section className="mt-10">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-black">{title}</h2>
-            <p className="mt-1 text-sm text-slate-600">{description}</p>
-          </div>
-          <span className="rounded-full bg-slate-100 px-4 py-2 text-sm font-black text-slate-700">{items.length}</span>
+  const columns = [
+    {
+      key: "name",
+      header: "Organisation",
+      render: (organisation: Organisation) => (
+        <div>
+          <p className="font-black text-brand-900">{organisation.name}</p>
+          <p className="text-xs text-slate-500">{organisation.user?.email ?? "—"}</p>
         </div>
-        <div className="card mt-5 overflow-x-auto">
-          {items.length === 0 ? <p className="text-slate-600">Aucune organisation.</p> : null}
-          {items.length > 0 ? (
-            <table className="w-full min-w-[1120px] text-left text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="py-3">Organization Name</th>
-                  <th className="py-3">Category/Type</th>
-                  <th className="py-3">Email</th>
-                  <th className="py-3">Phone Number</th>
-                  <th className="py-3">Address</th>
-                  <th className="py-3">Status</th>
-                  <th className="py-3">Registration Date</th>
-                  <th className="py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((organisation) => (
-                  <tr key={organisation.id} className="border-t border-slate-200 align-top">
-                    <td className="py-4 font-semibold">{organisation.name}</td>
-                    <td className="py-4">{organisation.category_type || organisation.sector || "-"}</td>
-                    <td className="py-4">{organisation.user?.email ?? "-"}</td>
-                    <td className="py-4">{organisation.phone_number || organisation.user?.phone_number || "-"}</td>
-                    <td className="py-4">{[organisation.address, organisation.city, organisation.country].filter(Boolean).join(", ") || "-"}</td>
-                    <td className="py-4">
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black">{displayStatus(organisation)}</span>
-                    </td>
-                    <td className="py-4">
-                      {organisation.verification_requested_at
-                        ? new Date(organisation.verification_requested_at).toLocaleDateString("fr-FR")
-                        : "-"}
-                    </td>
-                    <td className="py-4 text-right">
-                      <div className="flex flex-wrap justify-end gap-2">
-                        <button className="btn-secondary px-3 py-2 text-xs" onClick={() => viewDetails(organisation)}>
-                          View Details
-                        </button>
-                        <button className="btn-secondary px-3 py-2 text-xs" onClick={() => viewEvents(organisation)}>
-                          View Events
-                        </button>
-                        {mode !== "approved" ? (
-                          <button className="btn-primary px-3 py-2 text-xs" onClick={() => decide(organisation.id, "approve")}>
-                            Approve
-                          </button>
-                        ) : null}
-                        {mode !== "rejected" ? (
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => decide(organisation.id, "reject")}>
-                            Reject
-                          </button>
-                        ) : null}
-                        {mode === "pending" ? (
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => decide(organisation.id, "request-documents")}>
-                            More Docs
-                          </button>
-                        ) : null}
-                        {organisation.user?.status === "suspendu" && mode === "approved" ? (
-                          <button className="btn-primary px-3 py-2 text-xs" onClick={() => decide(organisation.id, "reactivate")}>
-                            Reactivate
-                          </button>
-                        ) : mode === "approved" ? (
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => decide(organisation.id, "suspend")}>
-                            Suspend
-                          </button>
-                        ) : null}
-                        <button className="rounded-full bg-red-600 px-3 py-2 text-xs font-semibold text-white" onClick={() => deleteOrganisation(organisation.id)}>
-                          Delete
-                        </button>
-                      </div>
-                      {mode === "pending" || mode === "rejected" ? (
-                        <textarea
-                          className="mt-2 min-h-16 w-full rounded-2xl border border-slate-300 px-3 py-2 text-xs"
-                          placeholder="Reject / document request reason..."
-                          value={reasons[organisation.id] ?? ""}
-                          onChange={(event) =>
-                            setReasons((current) => ({ ...current, [organisation.id]: event.target.value }))
-                          }
-                        />
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : null}
-        </div>
-      </section>
-    );
-  }
+      ),
+    },
+    {
+      key: "type",
+      header: "Catégorie",
+      render: (organisation: Organisation) => organisation.category_type || organisation.sector || "—",
+    },
+    {
+      key: "city",
+      header: "Ville",
+      render: (organisation: Organisation) => organisation.city || "—",
+    },
+    {
+      key: "status",
+      header: "Statut",
+      render: (organisation: Organisation) => <StatusBadge label={displayStatus(organisation)} tone={statusTone(organisation)} />,
+    },
+    {
+      key: "date",
+      header: "Inscription",
+      render: (organisation: Organisation) =>
+        organisation.verification_requested_at
+          ? new Date(organisation.verification_requested_at).toLocaleDateString("fr-FR")
+          : "—",
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      className: "text-right",
+      render: (organisation: Organisation) => (
+        <button type="button" className="btn-primary px-4 py-2 text-xs" onClick={() => openOrganisation(organisation)}>
+          Ouvrir
+        </button>
+      ),
+    },
+  ];
+
+  const summary = selectedOrganisation ? summaries[selectedOrganisation.id] : undefined;
+  const mode =
+    selectedOrganisation?.validation_status === "validee"
+      ? "approved"
+      : selectedOrganisation?.validation_status === "refusee"
+        ? "rejected"
+        : "pending";
 
   return (
-    <section className="mx-auto max-w-7xl px-6 py-12">
-      <p className="font-bold text-brand-600">Admin</p>
-      <h1 className="mt-2 text-4xl font-black">Organizations Management</h1>
-      <p className="mt-3 text-slate-600">
-        Pending, approved and rejected organizations with drill-down into details, events and event volunteers.
-      </p>
-      <RoleGate allowedRoles={["admin"]}>
+    <section>
+      <AdminPageHeader
+        title="Organisations"
+        subtitle="Validez les associations, consultez leurs événements et pilotez les comptes depuis un panneau dédié."
+      />
 
       <div className="mt-6 grid gap-3">
         <StatusMessage message={message} tone="success" />
         <StatusMessage message={error} tone="error" />
       </div>
 
-      {loading ? <div className="card mt-8 text-slate-600">Chargement...</div> : null}
-      {renderOrganisationTable("Pending Organizations", "Organizations awaiting verification or additional documents.", pendingOrganisations, "pending")}
-      {renderOrganisationTable("Approved Organizations", "Verified organizations, including active and suspended accounts.", approvedOrganisations, "approved")}
-      {renderOrganisationTable("Rejected Organizations", "Rejected requests archived for review.", rejectedOrganisations, "rejected")}
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Total" value={organisations.length} hint="Organisations inscrites" icon={Building2} tone="lilac" />
+        <StatCard label="En attente" value={pendingOrganisations.length} hint="À vérifier" icon={FileWarning} tone="pink" />
+        <StatCard label="Approuvées" value={approvedOrganisations.length} hint={`${suspendedCount} suspendue(s)`} icon={ShieldCheck} tone="mint" />
+        <StatCard label="Refusées" value={rejectedOrganisations.length} hint="Demandes archivées" icon={Users} tone="cyan" />
+      </div>
 
-      {selectedOrganisation ? (
-        <section className="card mt-10">
-          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-            <div>
-              <p className="font-bold text-brand-600">View Details</p>
-              <h2 className="mt-2 text-2xl font-black">{selectedOrganisation.name}</h2>
-              <p className="mt-3 max-w-3xl text-slate-600">{selectedOrganisation.description || "Aucune description."}</p>
-              <div className="mt-4 grid gap-2 text-sm text-slate-600 md:grid-cols-2">
-                <p><strong>Type:</strong> {selectedOrganisation.category_type || selectedOrganisation.sector || "-"}</p>
-                <p><strong>Email:</strong> {selectedOrganisation.user?.email ?? "-"}</p>
-                <p><strong>Phone:</strong> {selectedOrganisation.phone_number || selectedOrganisation.user?.phone_number || "-"}</p>
-                <p><strong>Address:</strong> {[selectedOrganisation.address, selectedOrganisation.city, selectedOrganisation.country].filter(Boolean).join(", ") || "-"}</p>
-                <p><strong>Status:</strong> {displayStatus(selectedOrganisation)}</p>
-                <p><strong>Registration:</strong> {new Date(selectedOrganisation.verification_requested_at).toLocaleDateString("fr-FR")}</p>
+      <div className="mt-8 flex flex-col gap-4 lg:flex-row lg:items-center">
+        <AdminTabs
+          value={tab}
+          onChange={setTab}
+          tabs={[
+            { id: "overview", label: "Vue d'ensemble", count: pendingOrganisations.length },
+            { id: "pending", label: "En attente", count: pendingOrganisations.length },
+            { id: "approved", label: "Approuvées", count: approvedOrganisations.length },
+            { id: "rejected", label: "Refusées", count: rejectedOrganisations.length },
+          ]}
+        />
+        {tab !== "overview" ? (
+          <AdminSearch value={search} onChange={setSearch} placeholder="Rechercher par nom, catégorie, e-mail ou statut..." />
+        ) : null}
+      </div>
+
+      {tab === "overview" ? (
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          <GlassCard>
+            <h2 className="text-lg font-black">À traiter en priorité</h2>
+            <p className="mt-1 text-sm text-slate-500">Les demandes qui attendent une décision.</p>
+            <div className="mt-5 grid gap-3">
+              {pendingOrganisations.slice(0, 5).map((organisation) => (
+                <button
+                  key={organisation.id}
+                  type="button"
+                  className="flex items-center justify-between rounded-2xl border border-white/50 bg-white/70 px-4 py-3 text-left transition-all duration-300 hover:-translate-y-0.5"
+                  onClick={() => openOrganisation(organisation)}
+                >
+                  <div>
+                    <p className="font-black">{organisation.name}</p>
+                    <p className="text-xs text-slate-500">{organisation.city || "Ville non renseignée"}</p>
+                  </div>
+                  <StatusBadge label={displayStatus(organisation)} tone={statusTone(organisation)} />
+                </button>
+              ))}
+              {pendingOrganisations.length === 0 ? (
+                <p className="text-sm text-slate-500">Aucune demande en attente. Tout est à jour.</p>
+              ) : null}
+            </div>
+          </GlassCard>
+          <GlassCard>
+            <h2 className="text-lg font-black">Raccourcis</h2>
+            <p className="mt-1 text-sm text-slate-500">Ouvrez une section sans faire défiler toute la page.</p>
+            <div className="mt-5 grid gap-3">
+              <button type="button" className="btn-secondary justify-between" onClick={() => setTab("pending")}>
+                Examiner les demandes
+              </button>
+              <button type="button" className="btn-secondary justify-between" onClick={() => setTab("approved")}>
+                Voir les organisations actives
+              </button>
+              <button type="button" className="btn-secondary justify-between" onClick={() => setTab("rejected")}>
+                Consulter les refus
+              </button>
+            </div>
+          </GlassCard>
+        </div>
+      ) : (
+        <GlassCard className="mt-6" hover={false} padding={false}>
+          <AdminTable
+            columns={columns}
+            rows={pagedRows}
+            rowKey={(organisation) => organisation.id}
+            loading={loading}
+            emptyTitle="Aucune organisation"
+            emptyDescription="Aucune organisation ne correspond à cet onglet ou à cette recherche."
+          />
+          <AdminPagination page={page} pageSize={PAGE_SIZE} total={visibleRows.length} onPageChange={setPage} />
+        </GlassCard>
+      )}
+
+      <SlideOver
+        open={Boolean(selectedOrganisation)}
+        title={selectedOrganisation?.name ?? "Organisation"}
+        subtitle={selectedOrganisation ? displayStatus(selectedOrganisation) : undefined}
+        onClose={closeDrawer}
+        footer={
+          selectedOrganisation ? (
+            <div className="grid gap-3">
+              {mode !== "approved" ? (
+                <textarea
+                  className="min-h-20 text-sm"
+                  placeholder="Motif de refus ou de demande de documents..."
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              ) : null}
+              <div className="flex flex-wrap justify-end gap-2">
+                {mode !== "approved" ? (
+                  <button type="button" className="btn-primary px-4 py-2 text-sm" onClick={() => decide(selectedOrganisation.id, "approve")}>
+                    Approuver
+                  </button>
+                ) : null}
+                {mode !== "rejected" ? (
+                  <button type="button" className="btn-secondary px-4 py-2 text-sm" onClick={() => decide(selectedOrganisation.id, "reject")}>
+                    Refuser
+                  </button>
+                ) : null}
+                {mode === "pending" ? (
+                  <button type="button" className="btn-secondary px-4 py-2 text-sm" onClick={() => decide(selectedOrganisation.id, "request-documents")}>
+                    Demander des documents
+                  </button>
+                ) : null}
+                {selectedOrganisation.user?.status === "suspendu" && mode === "approved" ? (
+                  <button type="button" className="btn-primary px-4 py-2 text-sm" onClick={() => decide(selectedOrganisation.id, "reactivate")}>
+                    Réactiver
+                  </button>
+                ) : mode === "approved" ? (
+                  <button type="button" className="btn-secondary px-4 py-2 text-sm" onClick={() => decide(selectedOrganisation.id, "suspend")}>
+                    Suspendre
+                  </button>
+                ) : null}
+                <button type="button" className="rounded-full bg-rose-500 px-4 py-2 text-sm font-bold text-white" onClick={() => setPendingDelete(selectedOrganisation)}>
+                  Supprimer
+                </button>
               </div>
             </div>
-            <button className="btn-primary" onClick={() => viewEvents(selectedOrganisation)}>
-              View Events
-            </button>
-          </div>
+          ) : null
+        }
+      >
+        {selectedOrganisation ? (
+          <div className="grid gap-6">
+            <AdminTabs
+              value={drawerTab}
+              onChange={(next) => {
+                if (next === "events") {
+                  void loadEvents(selectedOrganisation);
+                  return;
+                }
+                setDrawerTab(next);
+              }}
+              tabs={[
+                { id: "general", label: "Général" },
+                { id: "events", label: "Événements" },
+                { id: "volunteers", label: "Bénévoles" },
+              ]}
+            />
 
-          <div className="mt-6 grid gap-6 md:grid-cols-3">
-            <article className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm font-bold text-slate-500">Number of events</p>
-              <p className="mt-2 text-3xl font-black">{summaries[selectedOrganisation.id]?.events ?? "-"}</p>
-            </article>
-            <article className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm font-bold text-slate-500">Number of volunteers</p>
-              <p className="mt-2 text-3xl font-black">{summaries[selectedOrganisation.id]?.volunteers ?? "-"}</p>
-            </article>
-            <article className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-sm font-bold text-slate-500">Applications</p>
-              <p className="mt-2 text-3xl font-black">{summaries[selectedOrganisation.id]?.applications ?? "-"}</p>
-            </article>
-          </div>
+            {drawerTab === "general" ? (
+              <div className="grid gap-5">
+                <p className="text-sm leading-6 text-slate-600">{selectedOrganisation.description || "Aucune description."}</p>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="rounded-2xl bg-brand-50/70 p-4">
+                    <p className="text-xs font-bold text-slate-500">Événements</p>
+                    <p className="text-2xl font-black">{summary?.events ?? "—"}</p>
+                  </div>
+                  <div className="rounded-2xl bg-cyan-50/80 p-4">
+                    <p className="text-xs font-bold text-slate-500">Bénévoles</p>
+                    <p className="text-2xl font-black">{summary?.volunteers ?? "—"}</p>
+                  </div>
+                  <div className="rounded-2xl bg-pink-50/80 p-4">
+                    <p className="text-xs font-bold text-slate-500">Candidatures</p>
+                    <p className="text-2xl font-black">{summary?.applications ?? "—"}</p>
+                  </div>
+                </div>
+                <dl className="grid gap-3 text-sm">
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Type</dt>
+                    <dd className="font-semibold">{selectedOrganisation.category_type || selectedOrganisation.sector || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">E-mail</dt>
+                    <dd className="font-semibold">{selectedOrganisation.user?.email ?? "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Téléphone</dt>
+                    <dd className="font-semibold">{selectedOrganisation.phone_number || selectedOrganisation.user?.phone_number || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Adresse</dt>
+                    <dd className="text-right font-semibold">
+                      {[selectedOrganisation.address, selectedOrganisation.city, selectedOrganisation.country].filter(Boolean).join(", ") || "—"}
+                    </dd>
+                  </div>
+                </dl>
+                <div>
+                  <h3 className="font-black">Documents de vérification</h3>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedOrganisation.documents?.length ? (
+                      selectedOrganisation.documents.map((document) => (
+                        <a
+                          key={document.id}
+                          className="rounded-full border border-lilac/40 bg-white/80 px-3 py-2 text-xs font-bold"
+                          href={document.file_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {document.label || `Document n°${document.id}`}
+                        </a>
+                      ))
+                    ) : (
+                      <p className="text-sm text-rose-600">Aucun document téléversé.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
 
-          <div className="mt-6">
-            <h3 className="text-lg font-black">Verification documents</h3>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {selectedOrganisation.documents?.length ? (
-                selectedOrganisation.documents.map((document) => (
-                  <a key={document.id} className="rounded-full border border-slate-300 px-3 py-2 text-xs font-bold" href={document.file_url} target="_blank">
-                    {document.label || `Document #${document.id}`}
-                  </a>
-                ))
-              ) : (
-                <p className="text-sm text-red-600">No documents uploaded.</p>
-              )}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {selectedOrganisation && eventsLoadedForOrganisationId === selectedOrganisation.id ? (
-        <section className="card mt-8 overflow-x-auto">
-          <h2 className="text-2xl font-black">Events for {selectedOrganisation.name}</h2>
-          {selectedEvents.length === 0 ? <p className="mt-4 text-slate-600">No events for this organization.</p> : null}
-          {selectedEvents.length > 0 ? (
-          <table className="mt-5 w-full min-w-[900px] text-left text-sm">
-            <thead className="text-slate-500">
-              <tr>
-                <th className="py-3">Event Title</th>
-                <th className="py-3">Description</th>
-                <th className="py-3">Date</th>
-                <th className="py-3">Location</th>
-                <th className="py-3">Status</th>
-                <th className="py-3">Registered Volunteers</th>
-                <th className="py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {selectedEvents.map((event) => (
-                <tr key={event.id} className="border-t border-slate-200 align-top">
-                  <td className="py-4 font-semibold">{event.title}</td>
-                  <td className="py-4">{event.description || "-"}</td>
-                  <td className="py-4">{formatDate(event.starts_at)}</td>
-                  <td className="py-4">{[event.city, event.country].filter(Boolean).join(", ") || "-"}</td>
-                  <td className="py-4">{event.status}</td>
-                  <td className="py-4">{event.registered_volunteers_count}</td>
-                  <td className="py-4 text-right">
-                    <button className="btn-secondary px-3 py-2 text-xs" onClick={() => viewEventVolunteers(event)}>
-                      View Volunteers
+            {drawerTab === "events" ? (
+              <div className="grid gap-3">
+                {selectedEvents.length === 0 ? <p className="text-sm text-slate-500">Aucun événement pour cette organisation.</p> : null}
+                {selectedEvents.map((event) => (
+                  <div key={event.id} className="rounded-2xl border border-lilac/20 bg-white/70 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-black">{event.title}</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {formatDate(event.starts_at)} · {event.city || "Lieu à confirmer"}
+                        </p>
+                      </div>
+                      <StatusBadge label={labelStatus(event.status)} />
+                    </div>
+                    <button type="button" className="btn-secondary mt-3 px-3 py-2 text-xs" onClick={() => loadVolunteers(event)}>
+                      <Users className="h-3.5 w-3.5" /> Voir les bénévoles
                     </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          ) : null}
-        </section>
-      ) : null}
-
-      {selectedEvent ? (
-        <section className="card mt-8 overflow-x-auto">
-          <h2 className="text-2xl font-black">Volunteers in Event: {selectedEvent.title}</h2>
-          {selectedEventVolunteers.length === 0 ? <p className="mt-4 text-slate-600">No volunteers registered for this event.</p> : null}
-          {selectedEventVolunteers.length > 0 ? (
-            <table className="mt-5 w-full min-w-[860px] text-left text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="py-3">Volunteer Name</th>
-                  <th className="py-3">Email</th>
-                  <th className="py-3">Phone Number</th>
-                  <th className="py-3">Skills</th>
-                  <th className="py-3">Participation Status</th>
-                  <th className="py-3">Registration Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {selectedEventVolunteers.map((entry) => (
-                  <tr key={entry.application_id} className="border-t border-slate-200 align-top">
-                    <td className="py-4 font-semibold">{entry.volunteer.first_name} {entry.volunteer.last_name}</td>
-                    <td className="py-4">{entry.volunteer.user?.email ?? "-"}</td>
-                    <td className="py-4">{entry.volunteer.user?.phone_number || "-"}</td>
-                    <td className="py-4">
-                      {entry.volunteer.skills_summary?.length
-                        ? entry.volunteer.skills_summary.map((skill) => `${skill.name} (${skill.level})`).join(", ")
-                        : "-"}
-                    </td>
-                    <td className="py-4">{entry.participation_status}</td>
-                    <td className="py-4">{new Date(entry.registered_at).toLocaleDateString("fr-FR")}</td>
-                  </tr>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          ) : null}
-        </section>
-      ) : null}
-      </RoleGate>
+              </div>
+            ) : null}
+
+            {drawerTab === "volunteers" ? (
+              <div className="grid gap-3">
+                {selectedEvent ? (
+                  <p className="text-sm font-semibold text-slate-500">
+                    <CalendarDays className="mr-1 inline h-4 w-4" />
+                    {selectedEvent.title}
+                  </p>
+                ) : (
+                  <p className="text-sm text-slate-500">Choisissez un événement pour afficher ses bénévoles.</p>
+                )}
+                {selectedEventVolunteers.map((entry) => (
+                  <div key={entry.application_id} className="rounded-2xl border border-lilac/20 bg-white/70 p-4 text-sm">
+                    <p className="font-black">
+                      {entry.volunteer.first_name} {entry.volunteer.last_name}
+                    </p>
+                    <p className="mt-1 text-slate-500">{entry.volunteer.user?.email ?? "—"}</p>
+                    <p className="mt-2 text-xs">
+                      {labelStatus(entry.participation_status)} · {new Date(entry.registered_at).toLocaleDateString("fr-FR")}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </SlideOver>
+
+      <ConfirmDialog
+        open={Boolean(pendingDelete)}
+        title="Supprimer l'organisation ?"
+        description="Cette action supprimera l'organisation et ses données associées. Elle est irréversible."
+        confirmLabel="Supprimer"
+        cancelLabel="Annuler"
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </section>
   );
 }

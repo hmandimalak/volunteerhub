@@ -51,7 +51,7 @@ export async function login(email: string, password: string): Promise<LoginRespo
   });
 
   if (!response.ok) {
-    throw new Error("Email ou mot de passe invalide.");
+    throw new Error("E-mail ou mot de passe invalide.");
   }
 
   return response.json() as Promise<LoginResponse>;
@@ -64,11 +64,43 @@ export async function registerUser(formData: FormData): Promise<User> {
   });
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || "Inscription impossible.");
+    throw new Error(await parseApiError(response, "Inscription impossible."));
   }
 
   return response.json() as Promise<User>;
+}
+
+async function parseApiError(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
+  }
+  try {
+    const data = JSON.parse(text) as Record<string, unknown>;
+    if (typeof data.detail === "string") {
+      return data.detail;
+    }
+    const labels: Record<string, string> = {
+      email: "E-mail",
+      password: "Mot de passe",
+      username: "Identifiant",
+      first_name: "Prénom",
+      last_name: "Nom",
+      organisation_name: "Nom de l'organisation",
+      organisation_documents: "Documents officiels",
+      organisation_website: "Site web",
+      birth_date: "Date de naissance",
+      non_field_errors: "Erreur",
+    };
+    const messages = Object.entries(data).flatMap(([key, value]) => {
+      const label = labels[key] ?? key;
+      const textValue = Array.isArray(value) ? value.join(" ") : typeof value === "string" ? value : JSON.stringify(value);
+      return `${label} : ${textValue}`;
+    });
+    return messages.join(" ") || fallback;
+  } catch {
+    return text;
+  }
 }
 
 export async function fetchCurrentUser(): Promise<User> {
@@ -79,7 +111,7 @@ export async function authedFetch<T>(path: string, init?: RequestInit): Promise<
   const token = getAccessToken();
 
   if (!token) {
-    throw new Error("Connectez-vous pour charger ces donnees.");
+    throw new Error("Connectez-vous pour charger ces données.");
   }
 
   const isFormData = init?.body instanceof FormData;
@@ -107,7 +139,7 @@ export async function downloadAuthedFile(path: string, filename: string): Promis
   const token = getAccessToken();
 
   if (!token) {
-    throw new Error("Connectez-vous pour telecharger ce fichier.");
+    throw new Error("Connectez-vous pour télécharger ce fichier.");
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -115,7 +147,7 @@ export async function downloadAuthedFile(path: string, filename: string): Promis
   });
 
   if (!response.ok) {
-    throw new Error(`Telechargement impossible: ${response.status}`);
+    throw new Error(`Téléchargement impossible : ${response.status}`);
   }
 
   const blob = await response.blob();

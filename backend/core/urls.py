@@ -26,6 +26,8 @@ from .views import (
     volunteer_stats,
     mission_recommendations,
     scan_attendance_qr,
+    platform_stats,
+    featured_recommendations,
 )
 
 router = DefaultRouter()
@@ -56,4 +58,6 @@ urlpatterns = [
     path("stats/benevole/me/", volunteer_stats, name="volunteer-stats"),
     path("attendance/scan/", scan_attendance_qr, name="attendance-scan"),
     path("recommendations/missions/", mission_recommendations, name="mission-recommendations"),
+    path("recommendations/featured/", featured_recommendations, name="featured-recommendations"),
+    path("stats/platform/overview/", platform_stats, name="platform-stats"),
 ]

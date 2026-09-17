@@ -4,10 +4,10 @@ type StatusMessageProps = {
 };
 
 const styles = {
-  info: "border-slate-200 bg-slate-50 text-slate-700",
-  success: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  warning: "border-amber-200 bg-amber-50 text-amber-800",
-  error: "border-red-200 bg-red-50 text-red-700"
+  info: "border-lilac/40 bg-white/70 text-brand-900 dark:text-lilac",
+  success: "border-mint/50 bg-emerald-50/80 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200",
+  warning: "border-amber-200 bg-amber-50/80 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200",
+  error: "border-pink-200 bg-rose-50/80 text-rose-700 dark:bg-rose-500/15 dark:text-rose-200",
 };
 
 export function StatusMessage({ message, tone = "info" }: StatusMessageProps) {
@@ -15,5 +15,5 @@ export function StatusMessage({ message, tone = "info" }: StatusMessageProps) {
     return null;
   }
 
-  return <p className={`rounded-3xl border p-4 text-sm font-semibold ${styles[tone]}`}>{message}</p>;
+  return <p className={`rounded-3xl border p-4 text-sm font-semibold backdrop-blur ${styles[tone]}`}>{message}</p>;
 }

@@ -45,6 +45,7 @@ class Organisation(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     logo = models.ImageField(upload_to="organisations/logos/", blank=True)
+    signature = models.ImageField(upload_to="organisations/signatures/", blank=True)
     sector = models.CharField(max_length=100, blank=True)
     category_type = models.CharField(max_length=100, blank=True)
     website = models.URLField(blank=True)
@@ -98,6 +99,8 @@ class Volunteer(models.Model):
     level = models.ForeignKey(Level, on_delete=models.SET_NULL, null=True, blank=True)
     total_points = models.PositiveIntegerField(default=0)
     show_in_leaderboard = models.BooleanField(default=True)
+    emergency_contact_name = models.CharField(max_length=150, blank=True)
+    emergency_contact_phone = models.CharField(max_length=30, blank=True)
 
     def __str__(self) -> str:
         return f"{self.first_name} {self.last_name}"
@@ -248,6 +251,7 @@ class Attendance(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.CONFIRMED)
     validation_method = models.CharField(max_length=20, choices=Method.choices, default=Method.MANUAL)
     validated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    confirmed_hours = models.DecimalField(max_digits=6, decimal_places=1, null=True, blank=True)
 
 
 class Evaluation(models.Model):
@@ -259,10 +263,14 @@ class Evaluation(models.Model):
 
 
 class Badge(models.Model):
+    organisation = models.ForeignKey(
+        Organisation, on_delete=models.CASCADE, null=True, blank=True, related_name="badges"
+    )
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
     icon = models.ImageField(upload_to="badges/icons/", blank=True)
     condition = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
 
 
 class VolunteerBadge(models.Model):
@@ -278,6 +286,8 @@ class Certificate(models.Model):
     volunteer = models.ForeignKey(Volunteer, on_delete=models.CASCADE, related_name="certificates")
     event = models.ForeignKey(Event, on_delete=models.SET_NULL, null=True, blank=True)
     pdf = models.FileField(upload_to="certificates/")
+    hours = models.DecimalField(max_digits=6, decimal_places=1, default=0)
+    verification_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     generated_at = models.DateTimeField(auto_now_add=True)
 
 

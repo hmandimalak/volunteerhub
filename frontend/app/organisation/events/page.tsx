@@ -1,233 +1,231 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Event, EventVolunteer, Organisation, formatDate } from "@/lib/api";
+import { CalendarDays, MapPin, Plus, QrCode } from "lucide-react";
+import { Event, EventCategory, Organisation, PaginatedResponse, formatDate, unwrapResults } from "@/lib/api";
 import { authedFetch, downloadAuthedFile } from "@/lib/browser-api";
-import { RoleGate } from "@/components/RoleGate";
 import { StatusMessage } from "@/components/StatusMessage";
+import { labelStatus } from "@/lib/labels";
+import { AdminPageHeader, AdminSearch, EmptyState, GlassCard, SlideOver, StatusBadge } from "@/components/admin";
+import { Toast, useToast } from "@/components/portal/Toast";
+
+function eventTone(status: string): "success" | "warning" | "danger" | "info" | "neutral" {
+  if (status === "publie" || status === "en_cours") return "success";
+  if (status === "brouillon") return "warning";
+  if (status === "annule") return "danger";
+  if (status === "termine") return "info";
+  return "neutral";
+}
 
 export default function OrganisationEventsPage() {
   const [organisation, setOrganisation] = useState<Organisation | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
-  const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
-  const [participants, setParticipants] = useState<EventVolunteer[]>([]);
+  const [categories, setCategories] = useState<EventCategory[]>([]);
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [showArchived, setShowArchived] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
+  const { toast, showToast } = useToast();
 
-  async function loadEvents() {
+  async function loadEvents(archived = showArchived) {
     setLoading(true);
     setError("");
-
     try {
       const currentOrganisation = await authedFetch<Organisation>("/organisations/me/");
       setOrganisation(currentOrganisation);
-      const organisationEvents = await authedFetch<Event[]>(`/organisations/${currentOrganisation.id}/events/`);
+      const organisationEvents = await authedFetch<Event[]>(
+        `/organisations/${currentOrganisation.id}/events/?archived=${archived ? "true" : "false"}`
+      );
       setEvents(organisationEvents);
+      const categoryData = await authedFetch<PaginatedResponse<EventCategory> | EventCategory[]>("/categories-evenements/");
+      setCategories(unwrapResults(categoryData));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Impossible de charger les evenements.");
+      setError(err instanceof Error ? err.message : "Impossible de charger les événements.");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadEvents();
-  }, []);
-
-  async function viewParticipants(event: Event) {
-    setSelectedEvent(event);
-    setMessage("");
-    setError("");
-
-    try {
-      const data = await authedFetch<EventVolunteer[]>(`/evenements/${event.id}/volunteers/`);
-      setParticipants(data);
-      if (data.length === 0) {
-        setMessage("Aucun participant accepte pour cet evenement.");
-      }
-    } catch (err) {
-      setParticipants([]);
-      setError(err instanceof Error ? err.message : "Impossible de charger les participants.");
-    }
-  }
-
-  async function updateParticipation(applicationId: number, action: "confirm-participation" | "mark-attended" | "mark-completed" | "mark-absent") {
-    setMessage("");
-    setError("");
-
-    try {
-      await authedFetch(`/candidatures/${applicationId}/${action}/`, { method: "PATCH" });
-      setMessage("Statut de participation mis a jour. Le benevole a ete notifie.");
-      if (selectedEvent) {
-        await viewParticipants(selectedEvent);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Mise a jour impossible.");
-    }
-  }
+    loadEvents(showArchived);
+  }, [showArchived]);
 
   async function downloadOrganisationFile(path: string, filename: string) {
     setMessage("");
     setError("");
     try {
       await downloadAuthedFile(path, filename);
-      setMessage("Fichier telecharge.");
+      setMessage("Fichier téléchargé.");
+      showToast("Fichier téléchargé avec succès !");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Telechargement impossible.");
+      setError(err instanceof Error ? err.message : "Téléchargement impossible.");
     }
   }
 
+  const filteredEvents = useMemo(() => {
+    return events.filter((event) => {
+      const matchesSearch =
+        !search ||
+        event.title.toLowerCase().includes(search.toLowerCase()) ||
+        (event.description ?? "").toLowerCase().includes(search.toLowerCase()) ||
+        (event.city ?? "").toLowerCase().includes(search.toLowerCase());
+      const matchesCategory = !categoryFilter || String(event.category) === categoryFilter;
+      const matchesStatus = !statusFilter || event.status === statusFilter;
+      return matchesSearch && matchesCategory && matchesStatus;
+    });
+  }, [events, search, categoryFilter, statusFilter]);
+
+  const verified = organisation?.validation_status === "validee";
+
   return (
-    <section className="mx-auto max-w-7xl px-6 py-12">
-      <div className="flex flex-col justify-between gap-6 md:flex-row md:items-end">
-        <div>
-          <p className="font-bold text-brand-600">Organisation</p>
-          <h1 className="mt-2 text-4xl font-black">Events Management</h1>
-          <p className="mt-3 text-slate-600">
-            Suivez vos evenements et consultez les participants acceptes pour chaque evenement.
-          </p>
-        </div>
-        <Link
-          href="/organisation/events/new"
-          className={`btn-primary ${organisation?.validation_status !== "validee" ? "pointer-events-none opacity-50" : ""}`}
-        >
-          Nouvel evenement
-        </Link>
+    <section>
+      <AdminPageHeader
+        kicker="Organisation"
+        title="Mes événements"
+        subtitle="Pilotage complet : missions, candidatures, présence et récompenses pour vos événements."
+        actions={
+          <Link href="/organisation/events/new" className={`btn-primary ${verified ? "" : "pointer-events-none opacity-50"}`}>
+            <Plus className="h-4 w-4" /> Créer un événement
+          </Link>
+        }
+      />
+
+      <div className="mt-6 grid gap-3">
+        <StatusMessage message={message} tone="info" />
+        <StatusMessage message={error} tone="error" />
       </div>
 
-      <RoleGate allowedRoles={["organisation", "admin"]}>
-        <div className="mt-6 grid gap-3">
-          <StatusMessage message={message} tone="info" />
-          <StatusMessage message={error} tone="error" />
+      {organisation ? (
+        <div className="mt-6 flex flex-wrap gap-2">
+          <Link href="/organisation/attendance/scan" className="btn-secondary px-4 py-2 text-sm">
+            <QrCode className="h-4 w-4" /> Scanner un QR Code
+          </Link>
+          <button
+            className="btn-secondary px-4 py-2 text-sm"
+            onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/report-pdf/`, `rapport-organisation-${organisation.id}.pdf`)}
+          >
+            Rapport PDF
+          </button>
+          <button
+            className="btn-secondary px-4 py-2 text-sm"
+            onClick={() =>
+              downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=volunteers`, `benevoles-${organisation.id}.xlsx`)
+            }
+          >
+            Export bénévoles
+          </button>
+          <button
+            className="btn-secondary px-4 py-2 text-sm"
+            onClick={() =>
+              downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=applications`, `candidatures-${organisation.id}.xlsx`)
+            }
+          >
+            Export candidatures
+          </button>
+          <Link href="/organisation/rewards" className="btn-secondary px-4 py-2 text-sm">
+            Badges et récompenses
+          </Link>
         </div>
+      ) : null}
 
-        {organisation ? (
-          <div className="mt-6 flex flex-wrap gap-3">
-            <Link href="/organisation/attendance/scan" className="btn-primary">
-              Scanner QR presence
+      <div className="mt-6 flex flex-col gap-4 lg:flex-row lg:items-center">
+        <AdminSearch value={search} onChange={setSearch} placeholder="Rechercher un événement..." />
+        <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+          <option value="">Toutes les catégories</option>
+          {categories.map((category) => (
+            <option key={category.id} value={String(category.id)}>
+              {category.name}
+            </option>
+          ))}
+        </select>
+        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+          <option value="">Tous les statuts</option>
+          <option value="brouillon">Brouillon</option>
+          <option value="publie">Publié</option>
+          <option value="en_cours">En cours</option>
+          <option value="termine">Terminé</option>
+          <option value="annule">Annulé</option>
+        </select>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button className={!showArchived ? "chip chip-active" : "chip"} onClick={() => setShowArchived(false)}>
+          Événements actifs
+        </button>
+        <button className={showArchived ? "chip chip-active" : "chip"} onClick={() => setShowArchived(true)}>
+          Événements passés
+        </button>
+      </div>
+
+      {loading ? <p className="mt-8 text-sm text-slate-500">Chargement...</p> : null}
+
+      {!loading && filteredEvents.length === 0 ? (
+        <GlassCard className="mt-8" hover={false}>
+          <EmptyState title="Aucun événement" description="Créez votre premier événement ou changez de filtre." />
+        </GlassCard>
+      ) : null}
+
+      <div className="mt-8 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+        {filteredEvents.map((event) => (
+          <button key={event.id} type="button" className="text-left" onClick={() => setSelectedEvent(event)}>
+            <GlassCard className="h-full">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge label={labelStatus(event.status)} tone={eventTone(event.status)} />
+                {event.category_name ? <StatusBadge label={event.category_name} tone="info" /> : null}
+              </div>
+              <h2 className="mt-4 text-xl font-black">{event.title}</h2>
+              <p className="mt-2 line-clamp-2 text-sm text-slate-600">{event.description || "Aucune description."}</p>
+              <div className="mt-4 space-y-1 text-sm font-semibold text-slate-500">
+                <p className="flex items-center gap-2">
+                  <CalendarDays className="h-4 w-4" /> {formatDate(event.starts_at)}
+                </p>
+                <p className="flex items-center gap-2">
+                  <MapPin className="h-4 w-4" /> {[event.city, event.country].filter(Boolean).join(", ") || "Lieu à confirmer"}
+                </p>
+              </div>
+              <p className="mt-4 text-xs font-bold text-brand-600">{event.registered_volunteers_count} bénévole(s) inscrit(s)</p>
+            </GlassCard>
+          </button>
+        ))}
+      </div>
+
+      <SlideOver
+        open={Boolean(selectedEvent)}
+        title={selectedEvent?.title ?? "Événement"}
+        subtitle={selectedEvent ? formatDate(selectedEvent.starts_at) : undefined}
+        onClose={() => setSelectedEvent(null)}
+        footer={
+          selectedEvent ? (
+            <Link href={`/organisation/events/${selectedEvent.id}`} className="btn-primary w-full">
+              Ouvrir la fiche complète
             </Link>
-            <button className="btn-secondary px-4 py-2 text-sm" onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/report-pdf/`, `rapport-organisation-${organisation.id}.pdf`)}>
-              Rapport PDF
-            </button>
-            <button className="btn-secondary px-4 py-2 text-sm" onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=volunteers`, `benevoles-${organisation.id}.xlsx`)}>
-              Export benevoles
-            </button>
-            <button className="btn-secondary px-4 py-2 text-sm" onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=applications`, `candidatures-${organisation.id}.xlsx`)}>
-              Export candidatures
-            </button>
-            <button className="btn-secondary px-4 py-2 text-sm" onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=attendance`, `presences-${organisation.id}.xlsx`)}>
-              Export presences
-            </button>
-            <button className="btn-secondary px-4 py-2 text-sm" onClick={() => downloadOrganisationFile(`/organisations/${organisation.id}/export-excel/?type=events`, `evenements-${organisation.id}.xlsx`)}>
-              Export statistiques
-            </button>
-          </div>
-        ) : null}
-
-        <div className="card mt-8 overflow-x-auto">
-          {loading ? <p className="text-slate-600">Chargement...</p> : null}
-          {!loading && events.length === 0 ? <p className="text-slate-600">Aucun evenement.</p> : null}
-          {events.length > 0 ? (
-            <table className="w-full min-w-[900px] text-left text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="py-3">Event Title</th>
-                  <th className="py-3">Description</th>
-                  <th className="py-3">Date</th>
-                  <th className="py-3">Location</th>
-                  <th className="py-3">Status</th>
-                  <th className="py-3">Registered Volunteers</th>
-                  <th className="py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((event) => (
-                  <tr key={event.id} className="border-t border-slate-200 align-top">
-                    <td className="py-4 font-semibold">{event.title}</td>
-                    <td className="py-4">{event.description || "-"}</td>
-                    <td className="py-4">{formatDate(event.starts_at)}</td>
-                    <td className="py-4">{[event.city, event.country].filter(Boolean).join(", ") || "-"}</td>
-                    <td className="py-4">{event.status}</td>
-                    <td className="py-4">{event.registered_volunteers_count}</td>
-                    <td className="py-4 text-right">
-                      <button className="btn-secondary px-3 py-2 text-xs" onClick={() => viewParticipants(event)}>
-                        View Participants
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : null}
-        </div>
-
+          ) : null
+        }
+      >
         {selectedEvent ? (
-          <div className="card mt-8 overflow-x-auto">
-            <h2 className="text-2xl font-black">Participants: {selectedEvent.title}</h2>
-            <p className="mt-2 text-slate-600">Only accepted volunteers participating in this event are shown.</p>
-            {participants.length === 0 ? <p className="mt-5 text-slate-600">Aucun participant accepte.</p> : null}
-            {participants.length > 0 ? (
-              <table className="mt-5 w-full min-w-[860px] text-left text-sm">
-                <thead className="text-slate-500">
-                  <tr>
-                    <th className="py-3">Volunteer Name</th>
-                    <th className="py-3">Email</th>
-                    <th className="py-3">Phone Number</th>
-                    <th className="py-3">Skills</th>
-                    <th className="py-3">Registration Date</th>
-                    <th className="py-3">Participation Status</th>
-                    <th className="py-3">Arrival</th>
-                    <th className="py-3">Departure</th>
-                    <th className="py-3 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {participants.map((entry) => (
-                    <tr key={entry.application_id} className="border-t border-slate-200 align-top">
-                      <td className="py-4 font-semibold">{entry.volunteer.first_name} {entry.volunteer.last_name}</td>
-                      <td className="py-4">{entry.volunteer.user?.email ?? "-"}</td>
-                      <td className="py-4">{entry.volunteer.user?.phone_number || "-"}</td>
-                      <td className="py-4">
-                        {entry.volunteer.skills_summary?.length
-                          ? entry.volunteer.skills_summary.map((skill) => `${skill.name} (${skill.level})`).join(", ")
-                          : "-"}
-                      </td>
-                      <td className="py-4">{new Date(entry.registered_at).toLocaleDateString("fr-FR")}</td>
-                      <td className="py-4">{entry.participation_status}</td>
-                      <td className="py-4">{entry.arrived_at ? new Date(entry.arrived_at).toLocaleString("fr-FR") : "-"}</td>
-                      <td className="py-4">{entry.departed_at ? new Date(entry.departed_at).toLocaleString("fr-FR") : "-"}</td>
-                      <td className="py-4 text-right">
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => updateParticipation(entry.application_id, "confirm-participation")}>
-                            Confirm
-                          </button>
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => updateParticipation(entry.application_id, "mark-attended")}>
-                            Attended
-                          </button>
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => updateParticipation(entry.application_id, "mark-completed")}>
-                            Completed
-                          </button>
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => downloadOrganisationFile(`/candidatures/${entry.application_id}/qr-code/`, `qr-${entry.application_id}.png`)}>
-                            QR
-                          </button>
-                          <button className="btn-secondary px-3 py-2 text-xs" onClick={() => downloadOrganisationFile(`/candidatures/${entry.application_id}/certificate/`, `certificat-${entry.application_id}.pdf`)}>
-                            Certificat
-                          </button>
-                          <button className="rounded-full bg-red-600 px-3 py-2 text-xs font-semibold text-white" onClick={() => updateParticipation(entry.application_id, "mark-absent")}>
-                            Absent
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : null}
+          <div className="grid gap-4 text-sm">
+            <p className="leading-6 text-slate-600">{selectedEvent.description || "Aucune description."}</p>
+            <p>
+              <strong>Lieu :</strong> {[selectedEvent.address, selectedEvent.city, selectedEvent.country].filter(Boolean).join(", ") || "—"}
+            </p>
+            <p>
+              <strong>Statut :</strong> {labelStatus(selectedEvent.status)}
+            </p>
+            <p>
+              <strong>Bénévoles recherchés :</strong> {selectedEvent.volunteers_needed}
+            </p>
+            <Link href="/organisation/missions/new" className="btn-secondary">
+              Ajouter une mission
+            </Link>
           </div>
         ) : null}
-      </RoleGate>
+      </SlideOver>
+      <Toast toast={toast} />
     </section>
   );
 }

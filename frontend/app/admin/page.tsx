@@ -1,11 +1,12 @@
 "use client";
 
-import { BarChart3, Building2, CalendarDays, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { ArrowRight, BarChart3, Building2, CalendarDays, ShieldCheck, Sparkles, Users } from "lucide-react";
 import { AdminStats } from "@/lib/api";
 import { authedFetch } from "@/lib/browser-api";
-import { RoleGate } from "@/components/RoleGate";
+import { StatusMessage } from "@/components/StatusMessage";
+import { AdminPageHeader, GlassCard, StatCard } from "@/components/admin";
 
 export default function AdminDashboardPage() {
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -17,63 +18,83 @@ export default function AdminDashboardPage() {
       .catch((err) => setError(err instanceof Error ? err.message : "Statistiques indisponibles."));
   }, []);
 
-  const adminCards = [
-    { label: "Organisations", value: stats?.organisations ?? "-", icon: Building2 },
-    { label: "Evenements", value: stats?.events ?? "-", icon: CalendarDays },
-    { label: "Candidatures", value: stats?.applications ?? "-", icon: BarChart3 },
-    { label: "Candidatures acceptees", value: stats?.accepted_applications ?? "-", icon: ShieldCheck }
+  const shortcuts = [
+    {
+      href: "/admin/organisations",
+      icon: Building2,
+      title: "Organisations",
+      text: "Validez les associations, suspendez un compte ou consultez les documents.",
+    },
+    {
+      href: "/admin/events",
+      icon: CalendarDays,
+      title: "Événements",
+      text: "Parcourez les missions actives et archivées de toute la plateforme.",
+    },
+    {
+      href: "/admin/reports",
+      icon: BarChart3,
+      title: "Rapports",
+      text: "Suivez l'activité globale, les candidatures et l'impact des bénévoles.",
+    },
   ];
 
   return (
-    <section className="mx-auto max-w-7xl px-6 py-12">
-      <p className="font-bold text-brand-600">Administration plateforme</p>
-      <h1 className="mt-2 text-4xl font-black">Dashboard Overview</h1>
-      <RoleGate allowedRoles={["admin"]}>
+    <section>
+      <AdminPageHeader
+        title="Vue d'ensemble"
+        subtitle="Un tableau de bord clair pour piloter la plateforme sans faire défiler des listes interminables."
+      />
+
       {error ? (
-        <p className="mt-6 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          {error} Utilisez un compte admin connecte via `/login`.
-        </p>
+        <div className="mt-6">
+          <StatusMessage
+            message={`${error} Utilisez un compte administrateur connecté via la page de connexion.`}
+            tone="error"
+          />
+        </div>
       ) : null}
 
-      <div className="mt-8 grid gap-6 md:grid-cols-4">
-        {adminCards.map((card) => (
-          <article key={card.label} className="card">
-            <card.icon className="h-7 w-7 text-brand-600" />
-            <p className="mt-5 text-sm font-bold text-slate-500">{card.label}</p>
-            <p className="mt-2 text-3xl font-black">{card.value}</p>
-          </article>
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Organisations" value={stats?.organisations ?? "—"} icon={Building2} tone="lilac" />
+        <StatCard label="Événements" value={stats?.events ?? "—"} icon={CalendarDays} tone="cyan" />
+        <StatCard label="Candidatures" value={stats?.applications ?? "—"} icon={Users} tone="pink" />
+        <StatCard
+          label="Acceptées"
+          value={stats?.accepted_applications ?? "—"}
+          hint="Candidatures validées"
+          icon={ShieldCheck}
+          tone="mint"
+        />
+      </div>
+
+      <div className="mt-8 grid gap-6 lg:grid-cols-3">
+        {shortcuts.map((item) => (
+          <GlassCard key={item.href}>
+            <item.icon className="h-8 w-8 text-brand-600" />
+            <h2 className="mt-4 text-xl font-black">{item.title}</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{item.text}</p>
+            <Link href={item.href} className="btn-primary mt-6">
+              Ouvrir <ArrowRight className="h-4 w-4" />
+            </Link>
+          </GlassCard>
         ))}
       </div>
 
-      <div className="mt-8 grid gap-6 lg:grid-cols-2">
-        <div className="card">
-          <Building2 className="h-8 w-8 text-brand-600" />
-          <h2 className="mt-4 text-xl font-black">Organizations Management</h2>
-          <p className="mt-3 text-slate-600">
-            Gerer les organisations en attente et approuvees, avec benevoles integres par organisation.
-          </p>
-          <Link href="/admin/organisations" className="btn-primary mt-6">
-            Ouvrir
-          </Link>
+      <GlassCard className="mt-8" hover={false}>
+        <div className="flex items-start gap-4">
+          <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-cyan-400 text-white">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-lg font-black">Astuce de navigation</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+              Chaque section utilise des onglets, des cartes d'indicateurs et des panneaux latéraux. Les formulaires
+              denses restent cachés jusqu'à ce que vous en ayez besoin.
+            </p>
+          </div>
         </div>
-        <div className="card">
-          <CalendarDays className="h-8 w-8 text-brand-600" />
-          <h2 className="mt-4 text-xl font-black">Events Management</h2>
-          <p className="mt-3 text-slate-600">
-            Vue globale des evenements de toutes les organisations.
-          </p>
-          <Link href="/admin/events" className="btn-secondary mt-6">Ouvrir</Link>
-        </div>
-        <div className="card">
-          <BarChart3 className="h-8 w-8 text-brand-600" />
-          <h2 className="mt-4 text-xl font-black">Reports & Analytics</h2>
-          <p className="mt-3 text-slate-600">
-            Statistiques plateforme, candidatures, evenements et activite.
-          </p>
-          <Link href="/admin/reports" className="btn-secondary mt-6">Ouvrir</Link>
-        </div>
-      </div>
-      </RoleGate>
+      </GlassCard>
     </section>
   );
 }

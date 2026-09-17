@@ -29,6 +29,18 @@ class IsVerifiedOrganisation(BasePermission):
         return bool(organisation and organisation.is_verified)
 
 
+class IsVerifiedOrganisationOperator(BasePermission):
+    message = "Action reservee a l'organisation proprietaire. L'administration est en lecture seule."
+
+    def has_permission(self, request, view) -> bool:
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.role != "organisation":
+            return False
+        organisation = getattr(request.user, "organisation", None)
+        return bool(organisation and organisation.is_verified)
+
+
 class IsVolunteer(BasePermission):
     def has_permission(self, request, view) -> bool:
         return bool(request.user and request.user.is_authenticated and request.user.role == "benevole")

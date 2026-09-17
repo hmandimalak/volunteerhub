@@ -13,7 +13,7 @@ export const events = [
     city: "Nantes",
     date: "Chaque samedi",
     spots: 8,
-    description: "Socialisation et promenade encadree avec un referent animalier."
+    description: "Socialisation et promenade encadrée avec un référent animalier."
   },
   {
     title: "Nettoyage des berges",
@@ -21,12 +21,12 @@ export const events = [
     city: "Bordeaux",
     date: "5 juillet",
     spots: 32,
-    description: "Mission terrain ouverte aux debutants avec briefing securite."
+    description: "Mission terrain ouverte aux débutants avec briefing sécurité."
   }
 ];
 
 export const kpis = [
   { label: "Candidatures en attente", value: "24" },
-  { label: "Taux de presence", value: "87%" },
-  { label: "Heures validees", value: "1 240" }
+  { label: "Taux de présence", value: "87 %" },
+  { label: "Heures validées", value: "1 240" }
 ];

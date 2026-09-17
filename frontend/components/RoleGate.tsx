@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ReactNode, useEffect, useState } from "react";
 import { User } from "@/lib/api";
+import { labelRole } from "@/lib/labels";
 import { fetchCurrentUser, getAccessToken, getCurrentUserFromStorage, saveCurrentUser } from "@/lib/browser-api";
 import { StatusMessage } from "./StatusMessage";
 
@@ -37,7 +38,7 @@ export function RoleGate({ allowedRoles, children }: RoleGateProps) {
   }, []);
 
   if (loading) {
-    return <div className="card mt-8 text-slate-600">Verification des droits...</div>;
+    return <div className="card mt-8 text-slate-600">Vérification des droits...</div>;
   }
 
   if (error) {
@@ -55,13 +56,13 @@ export function RoleGate({ allowedRoles, children }: RoleGateProps) {
     return (
       <div className="card mt-8">
         <h2 className="text-xl font-black">Connexion requise</h2>
-        <p className="mt-2 text-slate-600">Vous devez vous connecter pour acceder a cet espace.</p>
+        <p className="mt-2 text-slate-600">Vous devez vous connecter pour accéder à cet espace.</p>
         <div className="mt-5 flex flex-wrap gap-3">
           <Link href="/login" className="btn-primary">
             Se connecter
           </Link>
           <Link href="/register" className="btn-secondary">
-            Creer un compte
+            Créer un compte
           </Link>
         </div>
       </div>
@@ -71,9 +72,9 @@ export function RoleGate({ allowedRoles, children }: RoleGateProps) {
   if (!allowedRoles.includes(user.role)) {
     return (
       <div className="card mt-8">
-        <h2 className="text-xl font-black">Acces refuse</h2>
+        <h2 className="text-xl font-black">Accès refusé</h2>
         <p className="mt-2 text-slate-600">
-          Votre role actuel est `{user.role}`. Cette page est reservee a : {allowedRoles.join(", ")}.
+          Votre rôle actuel est {labelRole(user.role)}. Cette page est réservée à : {allowedRoles.map(labelRole).join(", ")}.
         </p>
       </div>
     );

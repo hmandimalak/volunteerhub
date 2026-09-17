@@ -5,15 +5,22 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { registerUser } from "@/lib/browser-api";
 import { StatusMessage } from "@/components/StatusMessage";
+import { Dropzone } from "@/components/portal/Dropzone";
 
 type RegisterRole = "benevole" | "organisation" | "admin";
 
 export default function RegisterPage() {
   const router = useRouter();
   const [role, setRole] = useState<RegisterRole>("benevole");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [organisationDocuments, setOrganisationDocuments] = useState<File[]>([]);
+  const [profilePicture, setProfilePicture] = useState<File | null>(null);
+  const [profilePreview, setProfilePreview] = useState("");
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -21,19 +28,48 @@ export default function RegisterPage() {
     setMessage("");
 
     if (role === "admin") {
-      setError("Les comptes administrateur sont crees uniquement par un administrateur existant.");
+      setError("Les comptes administrateur sont créés uniquement par un administrateur existant.");
+      return;
+    }
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      setError("L'e-mail et le mot de passe sont obligatoires.");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Le mot de passe doit contenir au moins 8 caractères.");
+      return;
+    }
+    if (password !== passwordConfirm) {
+      setError("Les mots de passe ne correspondent pas.");
       return;
     }
 
     setLoading(true);
     const form = new FormData(event.currentTarget);
-    form.set("role", role);
-    ["organisation_documents", "profile_picture"].forEach((fieldName) => {
-      const file = form.get(fieldName);
-      if (file instanceof File && !file.name) {
-        form.delete(fieldName);
+    for (const key of Array.from(form.keys())) {
+      const value = form.get(key);
+      if (typeof value === "string" && value.trim() === "") {
+        form.delete(key);
       }
-    });
+    }
+    form.set("email", trimmedEmail);
+    form.set("password", password);
+    form.set("role", role);
+    form.delete("password_confirm");
+    form.delete("organisation_documents");
+    form.delete("profile_picture");
+    organisationDocuments.forEach((file) => form.append("organisation_documents", file));
+    if (profilePicture) {
+      form.append("profile_picture", profilePicture);
+    }
+
+    if (role === "organisation" && organisationDocuments.length === 0) {
+      setError("Ajoutez au moins un document officiel.");
+      setLoading(false);
+      return;
+    }
 
     const skills = String(form.get("skills_text") ?? "")
       .split(",")
@@ -46,8 +82,8 @@ export default function RegisterPage() {
       await registerUser(form);
       setMessage(
         role === "organisation"
-          ? "Organisation creee. Elle devra etre validee par un administrateur."
-          : "Compte benevole cree. Vous pouvez vous connecter.",
+          ? "Organisation créée. Elle devra être validée par un administrateur."
+          : "Compte bénévole créé. Vous pouvez vous connecter.",
       );
       setTimeout(() => router.push("/login"), 1200);
     } catch (err) {
@@ -59,11 +95,10 @@ export default function RegisterPage() {
 
   return (
     <section className="mx-auto max-w-4xl px-6 py-12">
-      <p className="font-bold text-brand-600">Inscription</p>
-      <h1 className="mt-2 text-4xl font-black">Creer un compte VolunteerHub</h1>
+      <p className="kicker">Inscription</p>
+      <h1 className="mt-4 text-4xl font-black">Créer un compte VolunteerHub</h1>
       <p className="mt-3 text-slate-600">
-        Le formulaire change selon le role. Les administrateurs ne peuvent pas etre crees publiquement pour des raisons
-        de securite.
+        Commencez par votre e-mail et votre mot de passe, puis complétez le profil bénévole ou organisation.
       </p>
 
       <div className="mt-6 grid gap-3">
@@ -74,14 +109,14 @@ export default function RegisterPage() {
       <form onSubmit={handleSubmit} className="card mt-8 grid gap-6">
         <div className="grid gap-3 md:grid-cols-3">
           {[
-            ["benevole", "Benevole"],
+            ["benevole", "Bénévole"],
             ["organisation", "Organisation"],
-            ["admin", "Administrateur"]
+            ["admin", "Administrateur"],
           ].map(([value, label]) => (
             <label
               key={value}
-              className={`cursor-pointer rounded-3xl border p-4 text-sm font-black ${
-                role === value ? "border-brand-600 bg-brand-50 text-brand-900" : "border-slate-200 bg-white"
+              className={`cursor-pointer rounded-3xl border p-4 text-sm font-black transition-all duration-300 hover:scale-[1.02] ${
+                role === value ? "border-brand-500 bg-brand-50 text-brand-900 dark:bg-brand-900/50 dark:text-lilac" : "border-lilac/40 bg-white/70"
               }`}
             >
               <input className="mr-2" type="radio" checked={role === value} onChange={() => setRole(value as RegisterRole)} />
@@ -91,29 +126,58 @@ export default function RegisterPage() {
         </div>
 
         {role === "admin" ? (
-          <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm font-semibold text-amber-800">
-            Un administrateur gere toute la plateforme. Pour proteger l'application, ce compte doit etre cree dans Django
-            Admin ou par un administrateur existant, pas via le formulaire public.
+          <div className="rounded-3xl border border-amber-200 bg-amber-50/80 p-5 text-sm font-semibold text-amber-800">
+            Un administrateur gère toute la plateforme. Pour protéger l'application, ce compte doit être créé dans
+            l'administration Django ou par un administrateur existant, pas via le formulaire public.
           </div>
         ) : null}
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <label className="grid gap-2 text-sm font-semibold">
-            Email
-            <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="email" type="email" required />
-          </label>
-          <label className="grid gap-2 text-sm font-semibold">
-            Mot de passe
-            <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="password" type="password" minLength={8} required />
-          </label>
-          <label className="grid gap-2 text-sm font-semibold">
-            Telephone
-            <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="phone_number" />
-          </label>
-          <label className="grid gap-2 text-sm font-semibold">
-            Identifiant optionnel
-            <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="username" />
-          </label>
+        <div className="grid gap-4 rounded-3xl border border-lilac/30 bg-white/70 p-5 backdrop-blur-md">
+          <h2 className="text-xl font-black">Identifiants de connexion</h2>
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="grid gap-2 text-sm font-semibold">
+              E-mail
+              <input
+                name="email"
+                type="email"
+                autoComplete="email"
+                placeholder="vous@exemple.fr"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                required
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-semibold">
+              Téléphone
+              <input name="phone_number" type="tel" placeholder="06 12 34 56 78" autoComplete="tel" />
+            </label>
+            <label className="grid gap-2 text-sm font-semibold">
+              Mot de passe
+              <input
+                name="password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Au moins 8 caractères"
+                minLength={8}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-semibold">
+              Confirmer le mot de passe
+              <input
+                name="password_confirm"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Répétez le mot de passe"
+                minLength={8}
+                value={passwordConfirm}
+                onChange={(event) => setPasswordConfirm(event.target.value)}
+                required
+              />
+            </label>
+          </div>
         </div>
 
         {role === "organisation" ? (
@@ -121,44 +185,44 @@ export default function RegisterPage() {
             <h2 className="text-xl font-black">Informations organisation</h2>
             <label className="grid gap-2 text-sm font-semibold">
               Nom de l'organisation
-              <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_name" required />
+              <input name="organisation_name" placeholder="Association solidaire" required />
             </label>
             <label className="grid gap-2 text-sm font-semibold">
               Description
-              <textarea className="min-h-28 rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_description" />
+              <textarea className="min-h-28" name="organisation_description" placeholder="Présentez votre structure..." />
             </label>
             <div className="grid gap-4 md:grid-cols-2">
               <label className="grid gap-2 text-sm font-semibold">
-                Categorie / type
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_category_type" placeholder="ONG, refuge, caritatif..." />
+                Catégorie / type
+                <input name="organisation_category_type" placeholder="ONG, refuge, caritatif..." />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Site web optionnel
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_website" type="url" />
+                <input name="organisation_website" placeholder="https://www.exemple.fr" />
               </label>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
               <label className="grid gap-2 text-sm font-semibold">
                 Adresse
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_address" />
+                <input name="organisation_address" placeholder="12 rue des Lilas" />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Ville
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_city" />
+                <input name="organisation_city" placeholder="Paris" />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Pays
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="organisation_country" defaultValue="France" />
+                <input name="organisation_country" defaultValue="France" />
               </label>
             </div>
             <label className="grid gap-2 text-sm font-semibold">
               Documents officiels obligatoires
-              <input
-                className="rounded-2xl border border-slate-300 px-4 py-3 font-normal"
-                name="organisation_documents"
-                type="file"
+              <Dropzone
+                variant="document"
                 multiple
-                required
+                files={organisationDocuments}
+                onFiles={setOrganisationDocuments}
+                label="Glissez vos documents officiels ou cliquez pour parcourir"
               />
             </label>
           </div>
@@ -166,55 +230,69 @@ export default function RegisterPage() {
 
         {role === "benevole" ? (
           <div className="grid gap-5">
-            <h2 className="text-xl font-black">Informations benevole</h2>
+            <h2 className="text-xl font-black">Informations bénévole</h2>
             <div className="grid gap-4 md:grid-cols-3">
               <label className="grid gap-2 text-sm font-semibold">
-                Prenom
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="first_name" required />
+                Prénom
+                <input name="first_name" placeholder="Léa" required />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Nom
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="last_name" required />
+                <input name="last_name" placeholder="Martin" required />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Date de naissance
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="birth_date" type="date" />
+                <input name="birth_date" type="date" />
               </label>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <label className="grid gap-2 text-sm font-semibold">
                 Adresse / localisation
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="volunteer_address" />
+                <input name="volunteer_address" placeholder="Ville ou quartier" />
               </label>
               <label className="grid gap-2 text-sm font-semibold">
                 Ville
-                <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="volunteer_city" />
+                <input name="volunteer_city" placeholder="Lyon" />
               </label>
             </div>
             <label className="grid gap-2 text-sm font-semibold">
-              Competences, separees par des virgules
-              <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="skills_text" placeholder="Logistique, accueil, animaux..." />
+              Compétences, séparées par des virgules
+              <input name="skills_text" placeholder="Logistique, accueil, animaux..." />
             </label>
             <label className="grid gap-2 text-sm font-semibold">
-              Centres d'interet
-              <textarea className="min-h-24 rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="volunteer_interests" />
+              Centres d'intérêt
+              <textarea className="min-h-24" name="volunteer_interests" placeholder="Environnement, éducation..." />
             </label>
             <label className="grid gap-2 text-sm font-semibold">
-              Disponibilites
-              <textarea className="min-h-24 rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="volunteer_availability" />
+              Disponibilités
+              <textarea className="min-h-24" name="volunteer_availability" placeholder="Soirs et week-ends" />
             </label>
             <label className="grid gap-2 text-sm font-semibold">
               Photo de profil optionnelle
-              <input className="rounded-2xl border border-slate-300 px-4 py-3 font-normal" name="profile_picture" type="file" accept="image/*" />
+              <Dropzone
+                previewUrl={profilePreview}
+                onFile={(file, url) => {
+                  setProfilePicture(file);
+                  setProfilePreview(url);
+                }}
+                onClear={() => {
+                  setProfilePicture(null);
+                  setProfilePreview("");
+                }}
+                label="Glissez une photo ou cliquez pour parcourir"
+              />
             </label>
           </div>
         ) : null}
 
         <button className="btn-primary" disabled={loading || role === "admin"} type="submit">
-          {loading ? "Inscription..." : "Creer le compte"}
+          {loading ? "Inscription..." : "Créer le compte"}
         </button>
         <p className="text-sm text-slate-600">
-          Deja inscrit ? <Link className="font-bold text-brand-900" href="/login">Se connecter</Link>
+          Déjà inscrit ?{" "}
+          <Link className="font-bold text-brand-700" href="/login">
+            Se connecter
+          </Link>
         </p>
       </form>
     </section>
